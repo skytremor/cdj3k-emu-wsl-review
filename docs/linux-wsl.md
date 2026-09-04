@@ -10,6 +10,11 @@ SHM transports: `main.shm` for the 1280×720 display and `jog.shm` for the
 320×240 jog display. No privileged TAP setup or physical USB access is needed
 for a basic launch.
 
+Building the workspace requires Rust/Cargo 1.85 or newer, matching the
+workspace `rust-version`. Virtual-media image creation additionally requires
+either `mkfs.exfat` or `mkfs.vfat` on `PATH`; `scripts/wsl/run.sh --virtual-media`
+checks for one before starting the application.
+
 ## First run
 
 Build non-proprietary resources and the pinned upstream QEMU 10.2.2 binary:

@@ -8,6 +8,7 @@ RESOURCES="${ROOT_DIR}/build/wsl-resources"
 HAS_QEMU=0
 HAS_QEMU_IMG=0
 HAS_RESOURCES=0
+HAS_VIRTUAL_MEDIA=0
 
 APP_ARGS=("$@")
 for ((index = 0; index < ${#APP_ARGS[@]}; index++)); do
@@ -15,13 +16,17 @@ for ((index = 0; index < ${#APP_ARGS[@]}; index++)); do
     --qemu) QEMU=${APP_ARGS[index + 1]:?--qemu requires a path}; HAS_QEMU=1 ;;
     --qemu-img) QEMU_IMG=${APP_ARGS[index + 1]:?--qemu-img requires a path}; HAS_QEMU_IMG=1 ;;
     --resources) RESOURCES=${APP_ARGS[index + 1]:?--resources requires a directory}; HAS_RESOURCES=1 ;;
+    --virtual-media) HAS_VIRTUAL_MEDIA=1 ;;
   esac
 done
 
-"${ROOT_DIR}/scripts/wsl/preflight.sh" \
+PREFLIGHT_ARGS=( \
   --qemu "${QEMU}" \
   --qemu-img "${QEMU_IMG}" \
-  --resources "${RESOURCES}"
+  --resources "${RESOURCES}" \
+)
+if (( HAS_VIRTUAL_MEDIA )); then PREFLIGHT_ARGS+=(--virtual-media); fi
+"${ROOT_DIR}/scripts/wsl/preflight.sh" "${PREFLIGHT_ARGS[@]}"
 
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"

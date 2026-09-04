@@ -7,12 +7,14 @@ source "${ROOT_DIR}/scripts/wsl/resource-layout.sh"
 QEMU="${ROOT_DIR}/build/wsl-qemu-install/bin/qemu-system-aarch64"
 QEMU_IMG="${ROOT_DIR}/build/wsl-qemu-install/bin/qemu-img"
 RESOURCES="${ROOT_DIR}/build/wsl-resources"
+VIRTUAL_MEDIA=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --qemu) QEMU=${2:?--qemu requires a path}; shift 2 ;;
     --qemu-img) QEMU_IMG=${2:?--qemu-img requires a path}; shift 2 ;;
     --resources) RESOURCES=${2:?--resources requires a directory}; shift 2 ;;
+    --virtual-media) VIRTUAL_MEDIA=1; shift ;;
     *) echo "unknown preflight option: $1" >&2; exit 2 ;;
   esac
 done
@@ -31,6 +33,15 @@ check_exec "QEMU" "${QEMU}"
 check_exec "qemu-img" "${QEMU_IMG}"
 if ! validate_resource_layout "${RESOURCES}"; then
   failures=$((failures + 1))
+fi
+
+if (( VIRTUAL_MEDIA )); then
+  if command -v mkfs.exfat >/dev/null || command -v mkfs.vfat >/dev/null; then
+    :
+  else
+    echo "missing virtual-media formatter: install mkfs.exfat or mkfs.vfat" >&2
+    failures=$((failures + 1))
+  fi
 fi
 
 if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then

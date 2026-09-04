@@ -107,10 +107,15 @@ mod linux {
             .unwrap_or_else(|| instance_dir.join("initramfs-patched.cpio.gz"));
         let emmc = (!args.no_emmc).then(|| cdj3k_emu_storage::default_path(instance));
         let settings = cdj3k_emu_storage::InstanceSettings::load_or_init(instance);
+        let effective_audio = (args.audio || settings.audio_enabled) && !args.no_audio;
+        let effective_audio_device = args
+            .audio_device
+            .clone()
+            .or_else(|| settings.audio_device_uid.clone());
         {
             let mut state = cdj3k_emu_platform::menu_state::lock();
-            state.audio_enabled = settings.audio_enabled;
-            state.audio_device_uid = settings.audio_device_uid.clone();
+            state.audio_enabled = effective_audio;
+            state.audio_device_uid = effective_audio_device.clone();
             state.alc_enabled = settings.alc_enabled;
             state.haptic_enabled = settings.haptic_enabled;
             if let Some(path) = settings
@@ -144,8 +149,8 @@ mod linux {
             guest,
             qemu,
             qemu_img: qemu_img.clone(),
-            audio: (args.audio || settings.audio_enabled) && !args.no_audio,
-            audio_device: args.audio_device.or(settings.audio_device_uid),
+            audio: effective_audio,
+            audio_device: effective_audio_device,
             network: !args.no_network,
             virtual_media: args.virtual_media,
             serial_log: None,
