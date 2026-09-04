@@ -88,6 +88,14 @@ pub struct JogLcdStream {
 
 impl JogLcdStream {
     pub fn new(socket_dir: &str, gate: crate::RepaintGate) -> Self {
+        Self::new_with_control_gate(socket_dir, gate, None)
+    }
+
+    pub fn new_with_control_gate(
+        socket_dir: &str,
+        gate: crate::RepaintGate,
+        control_gate: Option<Arc<crate::ControlConnectionGate>>,
+    ) -> Self {
         let dir = socket_dir.trim_end_matches('/').to_string();
         let shm_path = format!("{dir}/jog.shm");
         let slot: Arc<Mutex<Option<JogFrame>>> = Arc::new(Mutex::new(None));
@@ -98,7 +106,7 @@ impl JogLcdStream {
 
         thread::Builder::new()
             .name("jog-lcd-stream".into())
-            .spawn(move || stream_loop(&path, slot_clone, connected_clone, gate))
+            .spawn(move || stream_loop(&path, slot_clone, connected_clone, gate, control_gate))
             .expect("spawn jog-lcd-stream thread");
 
         Self {
@@ -155,6 +163,7 @@ fn stream_loop(
     slot: Arc<Mutex<Option<JogFrame>>>,
     connected: Arc<AtomicBool>,
     gate: crate::RepaintGate,
+    control_gate: Option<Arc<crate::ControlConnectionGate>>,
 ) {
     // Two `Arc<ColorImage>` buffers - rotate so the receiver can read while we
     // write the next frame without reallocating the 76 800-element pixel Vec.
@@ -259,6 +268,9 @@ fn stream_loop(
             }
             last_seq = seq_now;
             last_change_at = Some(Instant::now());
+            if let Some(control_gate) = control_gate.as_ref() {
+                control_gate.observe_jog(seq_now);
+            }
 
             let corners = corner_colors_from_canvas(canvas);
             if frame_count == 0 {

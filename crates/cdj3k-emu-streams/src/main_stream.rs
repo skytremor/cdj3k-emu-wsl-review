@@ -70,6 +70,14 @@ pub struct MainLcdStream {
 
 impl MainLcdStream {
     pub fn new(socket_dir: &str, gate: crate::RepaintGate) -> Self {
+        Self::new_with_control_gate(socket_dir, gate, None)
+    }
+
+    pub fn new_with_control_gate(
+        socket_dir: &str,
+        gate: crate::RepaintGate,
+        control_gate: Option<Arc<crate::ControlConnectionGate>>,
+    ) -> Self {
         let shm_path = format!("{}/main.shm", socket_dir.trim_end_matches('/'));
         let slot: Arc<Mutex<Option<DisplayDirty>>> = Arc::new(Mutex::new(None));
         let slot_clone = Arc::clone(&slot);
@@ -81,7 +89,16 @@ impl MainLcdStream {
 
         thread::Builder::new()
             .name("main-lcd-shm".into())
-            .spawn(move || shm_loop(&path, slot_clone, connected_clone, frames_seen_clone, gate))
+            .spawn(move || {
+                shm_loop(
+                    &path,
+                    slot_clone,
+                    connected_clone,
+                    frames_seen_clone,
+                    gate,
+                    control_gate,
+                )
+            })
             .expect("spawn main-lcd-shm thread");
 
         Self {
@@ -121,6 +138,7 @@ fn shm_loop(
     connected: Arc<AtomicBool>,
     frames_seen: Arc<AtomicU32>,
     gate: crate::RepaintGate,
+    control_gate: Option<Arc<crate::ControlConnectionGate>>,
 ) {
     let mut wait_logged = false;
     loop {
@@ -144,7 +162,7 @@ fn shm_loop(
             }
         };
 
-        poll_loop(&mmap, &slot, &frames_seen, &gate);
+        poll_loop(&mmap, &slot, &frames_seen, &gate, control_gate.as_ref());
 
         // QEMU restarted (magic gone).
         eprintln!("[main_stream] disconnected, reconnecting");
@@ -162,8 +180,12 @@ fn poll_loop(
     slot: &Arc<Mutex<Option<DisplayDirty>>>,
     frames_seen: &Arc<AtomicU32>,
     gate: &crate::RepaintGate,
+    control_gate: Option<&Arc<crate::ControlConnectionGate>>,
 ) {
-    let mut last_gen: u32 = read_u32(mmap, 4);
+    // Treat the already-published generation as the first event. QEMU writes
+    // an initial full frame before the host reader can attach; subtracting one
+    // makes that static frame visible instead of waiting for the next damage.
+    let mut last_gen: u32 = read_u32(mmap, 4).wrapping_sub(1);
 
     // Local dirty rect accumulator (x0, y0, x1, y1).
     // Accumulates the union of all dirty rects received since the last
@@ -200,6 +222,10 @@ fn poll_loop(
         let width = read_u32(mmap, 8) as usize;
         let height = read_u32(mmap, 12) as usize;
         let stride = read_u32(mmap, 16) as usize;
+
+        if let Some(control_gate) = control_gate {
+            control_gate.observe_main(gen, width as u32, height as u32);
+        }
 
         if width == 0
             || height == 0

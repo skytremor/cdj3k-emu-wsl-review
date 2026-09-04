@@ -15,7 +15,7 @@ pub mod vmnet;
 pub use cdj3k_emu_platform::runtime_paths;
 
 pub use cfg::{CfgClient, Latency};
-pub use config::QemuConfig;
+pub use config::{GuestRuntimeConfig, LinuxQemuConfig, QemuConfig};
 pub use instance::{
     cleanup_qemu_files, cleanup_runtime_files, kill_qemu_child, kill_qemu_child_now, InstanceError,
     QemuInstance, SHUTDOWN_SOCK_DIR,

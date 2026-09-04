@@ -1,5 +1,223 @@
 use std::path::PathBuf;
 
+/// Platform-neutral guest inputs shared by the macOS and Linux launchers.
+/// The Linux launcher owns the QEMU executable and host backend choices; this
+/// value only describes the guest topology and its per-instance state.
+#[derive(Clone, Debug)]
+pub struct GuestRuntimeConfig {
+    pub instance_id: u32,
+    pub kernel: PathBuf,
+    pub initramfs: PathBuf,
+    pub emmc_img: Option<PathBuf>,
+    pub run_dir: PathBuf,
+    pub qmp_port: u16,
+    pub ssh_port: u16,
+    pub mac: String,
+    pub service_mode: bool,
+}
+
+impl GuestRuntimeConfig {
+    pub fn main_shm_path(&self) -> PathBuf {
+        self.run_dir.join("main.shm")
+    }
+
+    pub fn jog_shm_path(&self) -> PathBuf {
+        self.run_dir.join("jog.shm")
+    }
+}
+
+/// Linux/WSL host-side QEMU configuration.  Keeping this separate from
+/// [`QemuConfig`] makes the existing macOS HVF/FFI defaults unchanged.
+#[derive(Clone, Debug)]
+pub struct LinuxQemuConfig {
+    pub guest: GuestRuntimeConfig,
+    pub qemu: PathBuf,
+    pub audio: bool,
+    pub audio_device: Option<String>,
+    pub network: bool,
+    pub virtual_media: bool,
+    /// Optional launch-scoped serial log. `spawn_linux` supplies a unique
+    /// path when this is `None`; callers may provide one for deterministic
+    /// tests or operator tooling.
+    pub serial_log: Option<PathBuf>,
+}
+
+impl LinuxQemuConfig {
+    pub fn build_argv(&self) -> Vec<String> {
+        let g = &self.guest;
+        let serial_log = self
+            .serial_log
+            .clone()
+            .unwrap_or_else(|| g.run_dir.join("serial.log"));
+        let mut args = vec![
+            "-machine".into(),
+            "virt,gic-version=3".into(),
+            "-accel".into(),
+            "tcg,thread=multi".into(),
+            "-cpu".into(),
+            "cortex-a72".into(),
+            "-smp".into(),
+            "4".into(),
+            "-m".into(),
+            "4038197248B".into(),
+            "-kernel".into(),
+            g.kernel.display().to_string(),
+            "-initrd".into(),
+            g.initramfs.display().to_string(),
+            "-append".into(),
+            linux_kernel_command_line(g, self.audio),
+            "-display".into(),
+            format!("shm,path={}", g.main_shm_path().display()),
+            "-qmp".into(),
+            format!("tcp:127.0.0.1:{},server=on,wait=off", g.qmp_port),
+            "-serial".into(),
+            format!("file:{}", serial_log.display()),
+            "-monitor".into(),
+            "none".into(),
+            "-no-reboot".into(),
+        ];
+
+        args.extend([
+            "-object".into(),
+            format!(
+                "memory-backend-file,id=jogshm,mem-path={},size=1M,share=on",
+                g.jog_shm_path().display()
+            ),
+            "-device".into(),
+            "ivshmem-plain,memdev=jogshm,master=on".into(),
+            "-device".into(),
+            "virtio-gpu-device,id=virtio-gpu0,xres=1280,yres=720,max_outputs=2".into(),
+            "-device".into(),
+            "virtio-serial-device,max_ports=8".into(),
+        ]);
+
+        for name in ["ctrl", "cfg"] {
+            args.extend([
+                "-chardev".into(),
+                format!(
+                    "socket,id=vserial_{name},path={},server=on,wait=off",
+                    g.run_dir.join(format!("{name}.sock")).display()
+                ),
+                "-device".into(),
+                format!("virtserialport,chardev=vserial_{name},name=cdj3k.{name}"),
+            ]);
+        }
+
+        if let Some(emmc) = &g.emmc_img {
+            args.extend([
+                "-drive".into(),
+                format!(
+                    "file={},if=none,id=emmc0,format=qcow2,cache=writeback,file.locking=off",
+                    emmc.display()
+                ),
+                "-device".into(),
+                "virtio-blk-device,drive=emmc0,id=emmc0".into(),
+            ]);
+        }
+
+        if self.virtual_media {
+            let placeholder = g.run_dir.join("usb.empty.medium");
+            args.extend([
+                "-drive".into(),
+                format!(
+                    "file={},if=none,id=usb0,format=raw,cache=writeback,file.locking=off",
+                    placeholder.display()
+                ),
+                "-device".into(),
+                "virtio-blk-device,drive=usb0,id=usb0".into(),
+            ]);
+        }
+
+        if self.audio {
+            let mut audio = "pa,id=audio0".to_string();
+            if let Some(device) = self.audio_device.as_deref().filter(|v| !v.is_empty()) {
+                audio.push_str(",out.name=");
+                audio.push_str(device);
+            }
+            args.extend([
+                "-audiodev".into(),
+                audio,
+                "-device".into(),
+                "virtio-sound-device,audiodev=audio0,streams=1".into(),
+            ]);
+        }
+
+        if self.network {
+            args.extend([
+                "-netdev".into(),
+                format!("user,id=net0,hostfwd=tcp::{}-:22", g.ssh_port),
+                "-device".into(),
+                format!("virtio-net-device,netdev=net0,mac={}", g.mac),
+            ]);
+        }
+        args
+    }
+}
+
+fn linux_kernel_command_line(guest: &GuestRuntimeConfig, audio: bool) -> String {
+    let mut cmd =
+        "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1".to_string();
+    if guest.service_mode {
+        cmd.push_str(" subucom_testmode");
+    }
+    if audio {
+        cmd.push_str(" snd-dummy.enable=0");
+    }
+    cmd
+}
+
+#[cfg(test)]
+mod linux_tests {
+    use super::*;
+
+    fn config() -> LinuxQemuConfig {
+        LinuxQemuConfig {
+            guest: GuestRuntimeConfig {
+                instance_id: 2,
+                kernel: "/tmp/Image".into(),
+                initramfs: "/tmp/initramfs".into(),
+                emmc_img: Some("/tmp/emmc.qcow2".into()),
+                run_dir: "/tmp/cdj3k-instance-2".into(),
+                qmp_port: 4447,
+                ssh_port: 2224,
+                mac: "0a:00:00:00:00:02".into(),
+                service_mode: false,
+            },
+            qemu: "qemu-system-aarch64".into(),
+            audio: false,
+            audio_device: None,
+            network: true,
+            virtual_media: false,
+            serial_log: None,
+        }
+    }
+
+    #[test]
+    fn linux_defaults_use_tcg_and_two_display_outputs() {
+        let args = config().build_argv();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-accel", "tcg,thread=multi"]));
+        assert!(args.iter().any(|arg| arg.contains("max_outputs=2")));
+        assert!(args.iter().any(|arg| arg.contains("4038197248B")));
+        assert!(args.iter().any(|arg| arg.contains("virtio-net-device")));
+        assert!(!args.iter().any(|arg| arg.contains("virtio-sound-device")));
+    }
+
+    #[test]
+    fn optional_audio_network_and_media_are_independent() {
+        let mut config = config();
+        config.audio = true;
+        config.network = false;
+        config.virtual_media = true;
+        let args = config.build_argv();
+        assert!(args.iter().any(|arg| arg.contains("virtio-sound-device")));
+        assert!(!args.iter().any(|arg| arg.contains("-netdev")));
+        assert!(args.iter().any(|arg| arg.contains("id=usb0")));
+        assert!(args.iter().any(|arg| arg.contains("id=emmc0")));
+    }
+}
+
 /// Configuration for a single QEMU CDJ-3000 instance.
 #[derive(Clone, Debug)]
 pub struct QemuConfig {

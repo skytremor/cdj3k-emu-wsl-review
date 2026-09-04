@@ -16,6 +16,9 @@ raw-window-handle = "0.6"
 muda = "0.15"
 rfd = { version = "0.15", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.5.2", features = ["relax-sign-encoding"] }
 objc2-app-kit = { version = "0.2.2", features = ["NSView", "NSWindow", "NSResponder", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSApplication", "NSRunningApplication"] }

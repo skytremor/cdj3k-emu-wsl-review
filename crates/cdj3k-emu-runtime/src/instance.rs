@@ -62,7 +62,7 @@ pub fn kill_qemu_child_now() {
 
 use cdj3k_emu_platform::menu_state;
 
-use crate::config::QemuConfig;
+use crate::config::{LinuxQemuConfig, QemuConfig};
 use crate::qmp::{QmpClient, QmpError};
 
 #[derive(Debug)]
@@ -94,6 +94,10 @@ struct Inner {
 /// A running QEMU instance.  Call `stop()` or let `Drop` send a quit + SIGKILL.
 pub struct QemuInstance {
     config: QemuConfig,
+    /// Runtime directory owned by this launch. Linux may use an explicit
+    /// per-instance directory rather than the macOS platform default.
+    runtime_dir: PathBuf,
+    serial_log_path: PathBuf,
     inner: Inner,
     running: Arc<AtomicBool>,
 }
@@ -212,6 +216,8 @@ impl QemuInstance {
         let qmp = QmpClient::connect_with_retry(config.qmp_port, Duration::from_secs(15))?;
 
         Ok(Self {
+            runtime_dir: config.sock_dir(),
+            serial_log_path: config.sock_dir().join("serial.log"),
             inner: Inner {
                 thread: Some(thread),
                 qmp,
@@ -223,8 +229,118 @@ impl QemuInstance {
         })
     }
 
+    /// Spawn the system QEMU binary used by the Linux/WSL application.
+    /// Unlike the macOS path this does not re-exec the application or use the
+    /// platform FFI; the child process is directly owned by this instance.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_linux(config: LinuxQemuConfig) -> Result<Self, InstanceError> {
+        let mut config = config;
+        let g = &config.guest;
+        std::fs::create_dir_all(&g.run_dir).map_err(InstanceError::SockDir)?;
+        prefill_sparse(&g.main_shm_path(), MAIN_SHM_PREFILL).map_err(InstanceError::SockDir)?;
+        prefill_sparse(&g.jog_shm_path(), JOG_SHM_BYTES).map_err(InstanceError::SockDir)?;
+        if config.virtual_media {
+            prefill_sparse(&g.run_dir.join("usb.empty.medium"), 512)
+                .map_err(InstanceError::SockDir)?;
+        }
+
+        let emmc_lock = if let Some(emmc) = &g.emmc_img {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(emmc)
+                .map_err(InstanceError::SockDir)?;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                return Err(InstanceError::EmmcLocked(emmc.clone()));
+            }
+            Some(file)
+        } else {
+            None
+        };
+
+        let serial_log_path = config.serial_log.clone().unwrap_or_else(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            g.run_dir.join(format!("serial-{nanos}.log"))
+        });
+        config.serial_log = Some(serial_log_path.clone());
+
+        let mut command = std::process::Command::new(&config.qemu);
+        command.args(config.build_argv()).current_dir(&g.run_dir);
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            let parent_pid = libc::getpid();
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent_pid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "parent exited before QEMU exec",
+                    ));
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(InstanceError::SockDir)?;
+        let pid = child.id();
+        QEMU_CHILD_PID.store(pid as i32, Ordering::Relaxed);
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = Arc::clone(&running);
+        let instance_id = g.instance_id;
+        let thread = std::thread::Builder::new()
+            .name(format!("qemu-linux-monitor-{instance_id}"))
+            .spawn(move || {
+                let code = child
+                    .wait()
+                    .map(|status| status.code().unwrap_or(-1))
+                    .unwrap_or(-1);
+                running_clone.store(false, Ordering::Release);
+                code
+            })
+            .map_err(InstanceError::SockDir)?;
+
+        let qmp = match QmpClient::connect_with_retry(g.qmp_port, Duration::from_secs(15)) {
+            Ok(qmp) => qmp,
+            Err(error) => {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                let _ = thread.join();
+                QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+                return Err(InstanceError::QmpConnect(error));
+            }
+        };
+
+        let mut mac_config = QemuConfig::new(g.kernel.clone(), g.initramfs.clone());
+        mac_config.instance_id = g.instance_id;
+        mac_config.emmc_img = g.emmc_img.clone();
+        mac_config.qmp_port = g.qmp_port;
+        mac_config.ssh_port = g.ssh_port;
+        mac_config.gdb_port = 1235 + g.instance_id as u16;
+        mac_config.mac = Some(g.mac.clone());
+        Ok(Self {
+            runtime_dir: g.run_dir.clone(),
+            serial_log_path,
+            config: mac_config,
+            inner: Inner {
+                thread: Some(thread),
+                qmp,
+                pid,
+                _emmc_lock: emmc_lock,
+            },
+            running,
+        })
+    }
+
     pub fn sock_dir(&self) -> PathBuf {
-        self.config.sock_dir()
+        self.runtime_dir.clone()
+    }
+
+    pub fn serial_log_path(&self) -> &Path {
+        &self.serial_log_path
     }
 
     pub fn is_running(&self) -> bool {
@@ -285,6 +401,8 @@ impl QemuInstance {
         unsafe {
             self.inner = std::ptr::read(&new.inner);
             self.config = std::ptr::read(&new.config);
+            self.runtime_dir = std::ptr::read(&new.runtime_dir);
+            self.serial_log_path = std::ptr::read(&new.serial_log_path);
             self.running = std::ptr::read(&new.running);
         }
         Ok(())
@@ -301,7 +419,7 @@ impl Drop for QemuInstance {
         self.shutdown_sequence();
         self.inner.thread.take().and_then(|t| t.join().ok());
         QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
-        cleanup_qemu_files_for_restart(&self.config.sock_dir());
+        cleanup_qemu_files_for_restart(&self.runtime_dir);
     }
 }
 
@@ -373,13 +491,13 @@ pub fn cleanup_runtime_files() {
     }
 }
 
-/// Remove the sock dir and everything inside it, plus the sibling ram.shm.
-/// Idempotent - safe to call when the directory does not exist.
+/// Remove launch-owned transient files while preserving the operator run
+/// directory and its diagnostics. Idempotent - safe to call when absent.
 pub fn cleanup_qemu_files(sock_dir: &Path) {
     cleanup_qemu_files_inner(sock_dir, /* keep_vmnet = */ false);
 }
 
-/// Restart-time cleanup: removes QEMU-managed files but preserves
+/// Restart-time cleanup: removes QEMU-managed transient files but preserves
 /// `vmnet-*.sock`, which is managed by `SocketVmnet`'s own lifetime and must
 /// outlive QEMU restarts (its daemon would exit if the socket vanished).
 pub fn cleanup_qemu_files_for_restart(sock_dir: &Path) {
@@ -387,32 +505,35 @@ pub fn cleanup_qemu_files_for_restart(sock_dir: &Path) {
 }
 
 fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
-    // Zero the shm magic *before* unlinking so any live reader (e.g. the UI's
-    // main_stream poll loop) sees magic=0 through its existing mmap and drops
-    // its mapping instead of staying stuck on the dead inode after restart.
-    for shm_name in &["main.shm", "jog.shm"] {
+    // Zero the SHM magic *before* unlinking so live readers drop their old
+    // mappings instead of remaining attached to a dead inode after restart.
+    for shm_name in &["main.shm", "jog.shm", "ram.shm"] {
         let shm = sock_dir.join(shm_name);
         if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&shm) {
             use std::io::Write;
             let _ = f.write_all(&[0u8; 4]);
         }
+        let _ = std::fs::remove_file(shm);
     }
-    if let Ok(entries) = std::fs::read_dir(sock_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if keep_vmnet && entry.file_name().to_string_lossy().starts_with("vmnet-") {
-                continue;
-            }
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_dir() {
-                    let _ = std::fs::remove_dir_all(&path);
-                } else {
-                    let _ = std::fs::remove_file(&path);
+
+    // These are launch-owned transport endpoints/backing files. Preserve
+    // serial logs and all other operator evidence in the run directory.
+    for name in [
+        "ctrl.sock",
+        "cfg.sock",
+        "usb.placeholder",
+        "usb.empty.medium",
+    ] {
+        let _ = std::fs::remove_file(sock_dir.join(name));
+    }
+
+    if !keep_vmnet {
+        if let Ok(entries) = std::fs::read_dir(sock_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("vmnet-") {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
-    }
-    if !keep_vmnet {
-        let _ = std::fs::remove_dir(sock_dir);
     }
 }

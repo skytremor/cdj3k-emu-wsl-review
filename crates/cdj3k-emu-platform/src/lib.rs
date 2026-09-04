@@ -1,6 +1,8 @@
 pub mod app_meta;
 #[cfg(target_os = "macos")]
 pub mod audio_devices;
+#[cfg(target_os = "linux")]
+pub mod audio_devices_linux;
 pub mod bundled;
 pub mod desktop;
 pub mod fonts;

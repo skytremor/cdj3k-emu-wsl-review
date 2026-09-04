@@ -19,6 +19,7 @@ use cdj3k_emu_platform::menu_state;
 use cdj3k_emu_streams::ctrl_stream::{CtrlStream, LedState};
 use cdj3k_emu_streams::jog_stream::JogLcdStream;
 use cdj3k_emu_streams::main_stream::MainLcdStream;
+use cdj3k_emu_streams::ControlConnectionGate;
 use cdj3k_emu_streams::RepaintGate;
 use cdj3k_emu_subucom::miso_frame::{self};
 
@@ -232,6 +233,11 @@ pub struct CdjApp {
     shutdown_in_progress: bool,
 }
 
+#[derive(Clone, Default)]
+pub struct CdjAppOptions {
+    pub control_gate: Option<Arc<ControlConnectionGate>>,
+}
+
 /// Owns the puffin HTTP server for the life of the process when profiling is
 /// enabled.  The server must outlive `CdjApp::new` (otherwise no client can
 /// connect) but never needs to be reclaimed - storing it here makes the
@@ -245,6 +251,15 @@ impl CdjApp {
     /// false (shipping default), every `puffin::profile_*` macro becomes
     /// a single relaxed-atomic load and no TCP port is opened.
     pub fn new(socket_dir: String, egui_ctx: egui::Context, profile: bool) -> Self {
+        Self::new_with_options(socket_dir, egui_ctx, profile, CdjAppOptions::default())
+    }
+
+    pub fn new_with_options(
+        socket_dir: String,
+        egui_ctx: egui::Context,
+        profile: bool,
+        options: CdjAppOptions,
+    ) -> Self {
         if profile {
             if let Ok(server) = puffin_http::Server::new(PUFFIN_SERVER_ADDR) {
                 let _ = PUFFIN_SERVER.set(server);
@@ -297,11 +312,23 @@ impl CdjApp {
             nav_scroll_accum: 0.0,
             jog_adjust_scroll_accum: 0.0,
             vinyl_scroll_accum: 0.0,
-            ctrl_stream: CtrlStream::new(&socket_dir, repaint_gate.clone()),
-            display_stream: MainLcdStream::new(&socket_dir, repaint_gate.clone()),
+            ctrl_stream: CtrlStream::new_with_control_gate(
+                &socket_dir,
+                repaint_gate.clone(),
+                options.control_gate.clone(),
+            ),
+            display_stream: MainLcdStream::new_with_control_gate(
+                &socket_dir,
+                repaint_gate.clone(),
+                options.control_gate.clone(),
+            ),
             display_gl_tex: None,
             display_tex_id: None,
-            jog_stream: JogLcdStream::new(&socket_dir, repaint_gate.clone()),
+            jog_stream: JogLcdStream::new_with_control_gate(
+                &socket_dir,
+                repaint_gate.clone(),
+                options.control_gate,
+            ),
             jog_gl_tex: None,
             jog_tex_id: None,
             jog_corner_label_colors: [ui::COL_BTN_TEXT; 4],

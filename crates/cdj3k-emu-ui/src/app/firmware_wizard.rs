@@ -435,6 +435,12 @@ impl FirmwareWizard {
 // ── Background provisioning ───────────────────────────────────────────────────
 
 fn bundled_resources() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CDJ3K_RESOURCES_DIR") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_dir() {
+            return path;
+        }
+    }
     if let Ok(exe) = std::env::current_exe() {
         let macos = exe.parent().unwrap_or(std::path::Path::new("."));
         let resources = macos.parent().unwrap_or(macos).join("Resources");

@@ -51,6 +51,14 @@ impl CtrlStream {
     /// Spawn the reader/writer thread and return a handle.
     /// `socket_dir` is e.g. `/tmp/cdj3k-0`; the socket is `{socket_dir}/ctrl.sock`.
     pub fn new(socket_dir: &str, gate: crate::RepaintGate) -> Self {
+        Self::new_with_control_gate(socket_dir, gate, None)
+    }
+
+    pub fn new_with_control_gate(
+        socket_dir: &str,
+        gate: crate::RepaintGate,
+        control_gate: Option<Arc<crate::ControlConnectionGate>>,
+    ) -> Self {
         let sock_path = PathBuf::from(socket_dir.trim_end_matches('/')).join("ctrl.sock");
         let state: Arc<Mutex<Option<LedState>>> = Arc::new(Mutex::new(None));
         let writer: Arc<Mutex<Option<UnixStream>>> = Arc::new(Mutex::new(None));
@@ -63,7 +71,16 @@ impl CtrlStream {
 
         thread::Builder::new()
             .name("ctrl-stream".into())
-            .spawn(move || stream_loop(path, state_clone, writer_clone, latest_clone, gate))
+            .spawn(move || {
+                stream_loop(
+                    path,
+                    state_clone,
+                    writer_clone,
+                    latest_clone,
+                    gate,
+                    control_gate,
+                )
+            })
             .expect("spawn ctrl-stream thread");
 
         Self {
@@ -126,6 +143,7 @@ fn stream_loop(
     writer: Arc<Mutex<Option<UnixStream>>>,
     latest_mosi: Arc<Mutex<[u8; 64]>>,
     gate: crate::RepaintGate,
+    control_gate: Option<Arc<crate::ControlConnectionGate>>,
 ) {
     // Rate-limit connect-failure logging: the socket is absent until QEMU is
     // spawned and after a guest restart.  Log the first failure, then every
@@ -133,6 +151,12 @@ fn stream_loop(
     // for the entire pre-spawn or post-crash window.
     let mut failed_attempts: u32 = 0;
     loop {
+        if let Some(readiness) = control_gate.as_ref() {
+            if !readiness.is_ready() {
+                thread::sleep(RECONNECT_DELAY);
+                continue;
+            }
+        }
         match UnixStream::connect(&sock_path) {
             Ok(stream) => {
                 eprintln!("[ctrl] connected to {}", sock_path.display());
@@ -146,7 +170,7 @@ fn stream_loop(
             }
             Err(e) => {
                 failed_attempts = failed_attempts.saturating_add(1);
-                if failed_attempts == 1 || failed_attempts.is_multiple_of(10) {
+                if failed_attempts == 1 || failed_attempts % 10 == 0 {
                     eprintln!(
                         "[ctrl] connect {}: {} (attempt {failed_attempts}, retrying in {:?})",
                         sock_path.display(),

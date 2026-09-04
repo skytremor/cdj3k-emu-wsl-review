@@ -7,6 +7,7 @@ members = [
   "crates/cdj3k-emu-ui",
   "crates/cdj3k-emu-runtime",
   "app/cdj3k-emu",
+  "app/cdj3k-emu-wsl",
   "crates/cdj3k-emu-storage",
   "crates/cdj3k-emu-firmware",
 ]
@@ -21,4 +22,3 @@ repository = "https://github.com/nsaintot/cdj3k-emu"
 # boundaries but aren't designed for crates.io consumption.  Keep them out
 # of any accidental `cargo publish` run.
 publish = false
-

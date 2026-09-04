@@ -394,4 +394,13 @@ pub fn refresh_audio_devices() {
             s.audio_device_list_version = s.audio_device_list_version.wrapping_add(1);
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let fresh = crate::audio_devices_linux::enumerate_output_devices();
+        let mut s = lock();
+        if s.audio_devices != fresh {
+            s.audio_devices = fresh;
+            s.audio_device_list_version = s.audio_device_list_version.wrapping_add(1);
+        }
+    }
 }

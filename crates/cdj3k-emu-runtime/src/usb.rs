@@ -122,7 +122,7 @@ fn is_valid_bsd_disk_path(p: &str) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::is_valid_bsd_disk_path;
 
