@@ -80,6 +80,7 @@ index 0000000..c3b7e60
 +    uint32_t generation = __atomic_load_n(&s->hdr->generation, __ATOMIC_RELAXED);
 +    generation += generation & 1u;
 +    __atomic_store_n(&s->hdr->generation, generation + 1u, __ATOMIC_RELEASE);
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 +    uint8_t *src = surface_data(s->surface) + (size_t)y * src_stride + (size_t)x * bpp;
 +    uint8_t *dst = (uint8_t *)s->hdr + SHM_PIXELS_OFFSET + (size_t)y * s->hdr->stride + (size_t)x * bpp;
 +    for (int row = 0; row < h; row++, src += src_stride, dst += s->hdr->stride) {

@@ -795,7 +795,9 @@ impl CdjApp {
                     };
                     ui.separator();
                     ui.label(qemu_label);
-                    ui.label(if application_started {
+                    ui.label(if !qemu_running {
+                        "App: stopped"
+                    } else if application_started {
                         "App: started"
                     } else {
                         "App: booting"

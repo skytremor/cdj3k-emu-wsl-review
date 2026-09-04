@@ -89,7 +89,7 @@ struct Inner {
     pid: u32,
     /// Held for the lifetime of the instance - blocks any other cdj3k-emu process
     /// from booting against the same eMMC qcow2 (qcow2 is not concurrent-safe).
-    _instance_lock: std::fs::File,
+    _instance_lock: Option<std::fs::File>,
     _emmc_lock: Option<std::fs::File>,
 }
 
@@ -110,10 +110,11 @@ impl QemuInstance {
     /// Kills any stale QEMU from a previous .app run before spawning.
     #[cfg(target_os = "macos")]
     pub fn spawn(config: QemuConfig) -> Result<Self, InstanceError> {
-        kill_stale(config.qmp_port, &config.sock_dir());
-
         std::fs::create_dir_all(config.sock_dir()).map_err(InstanceError::SockDir)?;
         let instance_lock = acquire_instance_lock(&config.sock_dir())?;
+        // Do not terminate another process until ownership of this instance
+        // directory has been established.
+        kill_stale(config.qmp_port, &config.sock_dir());
 
         // Exclusive non-blocking flock on the eMMC qcow2 - prevents two cdj3k-emu
         // instances from corrupting the same image. The lock is released when
@@ -227,7 +228,7 @@ impl QemuInstance {
                 thread: Some(thread),
                 qmp,
                 pid,
-                _instance_lock: instance_lock,
+                _instance_lock: Some(instance_lock),
                 _emmc_lock: emmc_lock,
             },
             config,
@@ -369,7 +370,7 @@ impl QemuInstance {
                 thread: Some(thread),
                 qmp,
                 pid,
-                _instance_lock: instance_lock,
+                _instance_lock: Some(instance_lock),
                 _emmc_lock: emmc_lock,
             },
             running,
@@ -430,18 +431,16 @@ impl QemuInstance {
     #[cfg(target_os = "macos")]
     pub fn restart(&mut self, new_config: QemuConfig) -> Result<(), InstanceError> {
         self.stop();
-        // Release both flocks before spawn tries to re-acquire them on new fds.
-        // The instance lock is intentionally a plain File (rather than an
-        // Option) because it must be held for the whole instance lifetime.
-        unsafe {
-            libc::flock(self.inner._instance_lock.as_raw_fd(), libc::LOCK_UN);
-        }
+        // Drop both lock descriptors before spawn tries to re-acquire them on
+        // new fds. `take()` makes the old instance's ownership explicit and
+        // prevents the descriptor from being leaked when `Inner` is replaced.
+        self.inner._instance_lock.take();
         self.inner._emmc_lock = None;
         let new = Self::spawn(new_config)?;
         let new = std::mem::ManuallyDrop::new(new);
         // SAFETY: `new` is wrapped in `ManuallyDrop`, so its destructor will
         // not run when `new` goes out of scope at the end of this function.
-        // The three `ptr::read`s bitwise-move each field into `self`,
+        // The `ptr::read`s bitwise-move each field into `self`,
         // overwriting `self`'s old fields whose destructors already ran via
         // `self.stop()` above plus the `_emmc_lock = None` drop on line 265
         // (i.e. self's own resources are already released).  After the

@@ -62,6 +62,10 @@ fn run(mut config: LinuxQemuConfig, start: bool, control_gate: Arc<ControlConnec
         if audio_changed {
             config.audio = audio_enabled;
             config.audio_device = audio_device;
+            persist_instance(config.guest.instance_id, |settings| {
+                settings.audio_enabled = audio_enabled;
+                settings.audio_device_uid = config.audio_device.clone();
+            });
             control_gate.invalidate();
             if let Some(mut old) = instance.take() {
                 old.stop();
@@ -191,9 +195,11 @@ fn run(mut config: LinuxQemuConfig, start: bool, control_gate: Arc<ControlConnec
         }
 
         let running = instance.as_ref().is_some_and(QemuInstance::is_running);
-        let mut state = menu_state::lock();
-        state.qemu_running = running;
-        state.application_started = control_gate.application_started();
+        {
+            let mut state = menu_state::lock();
+            state.qemu_running = running;
+            state.application_started = running && control_gate.application_started();
+        }
         thread::sleep(Duration::from_millis(100));
     }
 
@@ -214,7 +220,18 @@ fn attach_virtual(
         .qmp()
         .blockdev_change_medium("usb0", &path.to_string_lossy(), "raw")
         .map_err(|error| std::io::Error::other(format!("QMP: {error:?}")))?;
-    cfg_client.usb_attach()
+    if let Err(error) = cfg_client.usb_attach() {
+        let placeholder = instance.sock_dir().join("usb.empty.medium");
+        if let Err(rollback_error) =
+            instance
+                .qmp()
+                .blockdev_change_medium("usb0", &placeholder.to_string_lossy(), "raw")
+        {
+            eprintln!("cdj3k-emu-wsl: virtual media rollback failed: {rollback_error:?}");
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn create_virtual_image(qemu_img: &Path, path: &Path, size_bytes: u64) -> std::io::Result<()> {
