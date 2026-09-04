@@ -30,6 +30,8 @@ mod linux {
         #[arg(long)]
         pub qemu: Option<PathBuf>,
         #[arg(long)]
+        pub qemu_img: Option<PathBuf>,
+        #[arg(long)]
         pub resources: Option<PathBuf>,
         #[arg(long)]
         pub audio: bool,
@@ -93,10 +95,6 @@ mod linux {
         let args = Args::parse();
         let instance = args.instance.max(1);
         cdj3k_emu_platform::menu_state::lock().current_instance_id = instance;
-
-        if let Some(resources) = args.resources.as_ref() {
-            std::env::set_var("CDJ3K_RESOURCES_DIR", resources);
-        }
 
         let instance_dir = cdj3k_emu_storage::default_path(instance)
             .parent()
@@ -171,6 +169,8 @@ mod linux {
                     args.profile,
                     cdj3k_emu_ui::app::CdjAppOptions {
                         control_gate: Some(Arc::clone(&control_gate)),
+                        firmware_resources: args.resources.clone(),
+                        qemu_img: args.qemu_img.clone(),
                     },
                 );
                 crate::runtime::spawn(config, start_qemu, Arc::clone(&control_gate));

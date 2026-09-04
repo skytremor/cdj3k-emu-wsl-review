@@ -59,10 +59,16 @@ pub struct FirmwareWizard {
     /// wizard is shown; the main window keeps stealing focus on macOS until we
     /// explicitly raise the wizard.
     focused_after_open: bool,
+    resources_dir: Option<PathBuf>,
+    qemu_img: Option<PathBuf>,
 }
 
 impl FirmwareWizard {
     pub fn new() -> Self {
+        Self::new_with_options(None, None)
+    }
+
+    pub fn new_with_options(resources_dir: Option<PathBuf>, qemu_img: Option<PathBuf>) -> Self {
         Self {
             open: false,
             upd_path: String::new(),
@@ -72,6 +78,8 @@ impl FirmwareWizard {
             provision_status: None,
             terminal: None,
             focused_after_open: false,
+            resources_dir,
+            qemu_img,
         }
     }
 
@@ -411,6 +419,8 @@ impl FirmwareWizard {
 
         let upd = PathBuf::from(&self.upd_path);
         let target = self.target_instance;
+        let resources_dir = self.resources_dir.clone();
+        let qemu_img = self.qemu_img.clone();
         let status = Arc::new(Mutex::new(ProvisionStep::Decrypting));
         self.provision_status = Some(status.clone());
 
@@ -420,7 +430,7 @@ impl FirmwareWizard {
 
         std::thread::Builder::new()
             .name("cdj3k-emu-provision".into())
-            .spawn(move || provision(upd, key, target, status, log, ctx))
+            .spawn(move || provision(upd, key, target, resources_dir, qemu_img, status, log, ctx))
             .expect("failed to spawn provision thread");
     }
 
@@ -434,12 +444,9 @@ impl FirmwareWizard {
 
 // ── Background provisioning ───────────────────────────────────────────────────
 
-fn bundled_resources() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os("CDJ3K_RESOURCES_DIR") {
-        let path = std::path::PathBuf::from(path);
-        if path.is_dir() {
-            return path;
-        }
+fn bundled_resources(explicit: Option<&PathBuf>) -> std::path::PathBuf {
+    if let Some(path) = explicit.filter(|path| path.is_dir()) {
+        return path.clone();
     }
     if let Ok(exe) = std::env::current_exe() {
         let macos = exe.parent().unwrap_or(std::path::Path::new("."));
@@ -459,6 +466,8 @@ fn provision(
     upd_path: PathBuf,
     key: cdj3k_emu_firmware::LuksKey,
     target_instance: u32,
+    resources_dir: Option<PathBuf>,
+    qemu_img: Option<PathBuf>,
     status: Arc<Mutex<ProvisionStep>>,
     log: Arc<Mutex<String>>,
     ctx: Context,
@@ -540,7 +549,7 @@ fn provision(
     );
 
     // Vanilla kernel ships in the app bundle - no Pioneer extraction or SMC patching.
-    let resources_dir = bundled_resources();
+    let resources_dir = bundled_resources(resources_dir.as_ref());
     let kernel_src = resources_dir.join("Image");
     let kernel_out = out_dir.join("Image");
     log!(
@@ -610,6 +619,7 @@ fn provision(
         path: emmc_path,
         instance_id: target_instance,
         firmware: firmware_info,
+        qemu_img,
     };
     try_step!(
         ProvisionStep::CreatingEmmc,

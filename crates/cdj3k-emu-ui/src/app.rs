@@ -236,6 +236,8 @@ pub struct CdjApp {
 #[derive(Clone, Default)]
 pub struct CdjAppOptions {
     pub control_gate: Option<Arc<ControlConnectionGate>>,
+    pub firmware_resources: Option<std::path::PathBuf>,
+    pub qemu_img: Option<std::path::PathBuf>,
 }
 
 /// Owns the puffin HTTP server for the life of the process when profiling is
@@ -357,7 +359,7 @@ impl CdjApp {
             jog_dbg_last_dt: 0.0,
             jog_dbg_last_omega_sample: 0.0,
             jog_dbg_lines: [String::new(), String::new(), String::new()],
-            wizard: FirmwareWizard::new(),
+            wizard: FirmwareWizard::new_with_options(options.firmware_resources, options.qemu_img),
             frame_baseline_at_boot: 0,
             qemu_was_running: false,
             shade_alpha: 1.0,

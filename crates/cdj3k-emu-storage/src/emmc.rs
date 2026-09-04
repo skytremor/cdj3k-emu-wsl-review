@@ -48,6 +48,9 @@ pub struct EmmcConfig {
     pub instance_id: u32,
     /// Version metadata from the firmware ISO.
     pub firmware: FirmwareInfo,
+    /// Optional explicit qemu-img binary. `None` retains the native bundled
+    /// tool lookup used by the macOS application.
+    pub qemu_img: Option<PathBuf>,
 }
 
 impl EmmcConfig {
@@ -56,6 +59,7 @@ impl EmmcConfig {
             path,
             instance_id,
             firmware: FirmwareInfo::default(),
+            qemu_img: None,
         }
     }
 }
@@ -85,7 +89,7 @@ pub fn provision_emmc(config: &EmmcConfig) -> std::io::Result<&Path> {
     // [`cdj3k_emu_platform::bundled::tool`], which prefers the copy bundled
     // next to the running executable so Finder-launched .app instances don't
     // depend on the user's shell PATH.
-    convert_to_qcow2(&raw_path, &config.path)?;
+    convert_to_qcow2(&raw_path, &config.path, config.qemu_img.as_deref())?;
     std::fs::remove_file(&raw_path)?;
 
     Ok(&config.path)
@@ -219,8 +223,11 @@ fn write_gpt_raw(raw_path: &Path, instance_id: u32, fw: &FirmwareInfo) -> std::i
     write_uboot_env(&mut file, instance_id, fw)
 }
 
-fn convert_to_qcow2(raw: &Path, out: &Path) -> std::io::Result<()> {
-    let status = Command::new(cdj3k_emu_platform::bundled::tool("qemu-img"))
+fn convert_to_qcow2(raw: &Path, out: &Path, qemu_img: Option<&Path>) -> std::io::Result<()> {
+    let tool = qemu_img
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cdj3k_emu_platform::bundled::tool("qemu-img"));
+    let status = Command::new(tool)
         .args([
             "convert",
             "-f",
