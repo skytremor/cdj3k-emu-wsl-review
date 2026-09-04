@@ -191,11 +191,7 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
     return 0;
 }
 
-#ifdef __GLIBC__
-int gettimeofday(struct timeval *tv, struct timezone *tz)
-#else
 int gettimeofday(struct timeval *tv, void *tz)
-#endif
 {
     long r = syscall(SYS_gettimeofday, tv, tz);
     if (r < 0) { errno = (int)-r; return -1; }
