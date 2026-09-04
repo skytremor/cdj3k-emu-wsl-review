@@ -1,0 +1,43 @@
+diff --git a/qapi/ui.json b/qapi/ui.json
+index b2c42a7..ec7bdf9 100644
+--- a/qapi/ui.json
++++ b/qapi/ui.json
+@@ -1517,6 +1517,8 @@
+ #
+ # @dbus: Start a D-Bus service for the display.  (Since 7.0)
+ #
++# @shm: Repository-owned WSL shared-memory display extension.
++#
+ # Since: 2.12
+ ##
+ { 'enum'    : 'DisplayType',
+@@ -1525,6 +1525,7 @@
+     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
+     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
+     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
+-    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' }
++    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
++    { 'name': 'shm' }
+   ]
+ }
+@@ -1532,0 +1533,11 @@
++##
++# @DisplaySHM:
++#
++# Options for the shared-memory display backend.
++#
++# @path: Path of the shared-memory file to create.
++#
++# Repository extension; not an upstream QEMU display backend.
++##
++{ 'struct': 'DisplaySHM',
++  'data': { 'path': 'str' } }
+@@ -1563,6 +1575,7 @@
+       'egl-headless': { 'type': 'DisplayEGLHeadless',
+                         'if': 'CONFIG_OPENGL' },
+       'dbus': { 'type': 'DisplayDBus', 'if': 'CONFIG_DBUS_DISPLAY' },
+-      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' }
++      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' },
++      'shm': { 'type': 'DisplaySHM' }
+   }
+ }

@@ -52,7 +52,8 @@ RUN git clone --depth=1 --branch ${LINUX_TAG} \
 #
 # The .config is the only non-patch artefact and is copied separately.
 COPY guest/kernel-patches/ /tmp/kernel-patches/
-RUN cp /tmp/kernel-patches/cdj3k-emu-kernel.config /kernel/.config && \
+RUN cp /tmp/kernel-patches/cdj3k_jog_mode.h /kernel/drivers/gpu/drm/virtio/ && \
+    cp /tmp/kernel-patches/cdj3k-emu-kernel.config /kernel/.config && \
     cd /kernel && \
     for p in /tmp/kernel-patches/*.patch; do \
         echo "    [apply] $(basename $p)"; \

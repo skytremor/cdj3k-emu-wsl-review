@@ -90,20 +90,20 @@ static drm_api_connector_t *_get_connector_real(int fd, uint32_t id) {
     c->count_encoders    = (int)ne;
     c->encoders          = encs;
 
-#define DRM_MODE_CONNECTOR_DSI_TYPE 16u
+#define DRM_MODE_CONNECTOR_DSI_TYPE CDJ3K_JOG_CONNECTOR_TYPE
     if (c->connector_type == DRM_MODE_CONNECTOR_DSI_TYPE &&
-        c->connector_type_id == 2u &&
-        c->count_modes == 0) {
-        drm_api_modeinfo_t *syn = (drm_api_modeinfo_t *)calloc(1, sizeof(*syn));
-        if (syn) {
-            memcpy(syn, &g_fake_mode, sizeof(fake_modeinfo_t));
-            free(modes);
-            c->modes      = syn;
-            c->count_modes = 1;
+        c->connector_type_id == CDJ3K_JOG_CONNECTOR_TYPE_ID) {
+        if (c->count_modes != 1 || !c->modes ||
+            !jog_mode_contract_matches((const fake_modeinfo_t *)&c->modes[0])) {
             fprintf(stderr,
-                    "[ep122_shim] drmModeGetConnector(id=%u): synthesized "
-                    "1280x240 preferred mode for jog DSI-2\n", id);
+                    "[ep122_shim] jog mode contract rejected: DSI-2 connector "
+                    "returned %d mode(s), expected one exact %s mode\n",
+                    c->count_modes, CDJ3K_JOG_MODE_CONTRACT_ID);
+            drmModeFreeConnector(c);
+            return NULL;
         }
+        fprintf(stderr, "[ep122_shim] jog mode contract verified: %s\n",
+                CDJ3K_JOG_MODE_CONTRACT_ID);
     }
 
     DBG("drmModeGetConnector(fd=%d, id=%u) type=%u type_id=%u → forced connected\n",

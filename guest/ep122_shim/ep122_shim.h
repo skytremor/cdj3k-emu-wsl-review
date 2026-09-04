@@ -39,6 +39,7 @@
 #include <time.h>
 #include <poll.h>
 #include <sched.h>
+#include "cdj3k_jog_mode.h"
 
 /* ------------------------------------------------------------------ */
 /* Configuration macros                                               */
@@ -99,14 +100,14 @@
 #define FAKE_FB_ID        1u
 #define FAKE_DUMB_HANDLE  1u
 
-/* CDJ-3000 jog LCD (DSI-2): 1280×240 @ 71 Hz */
-#define FAKE_W         1280u
-#define FAKE_H         240u
+/* CDJ-3000 jog LCD: values come exclusively from the shared contract. */
+#define FAKE_W         CDJ3K_JOG_MODE_HDISPLAY
+#define FAKE_H         CDJ3K_JOG_MODE_VDISPLAY
 #define FAKE_BPP       32u
 #define FAKE_PITCH     (FAKE_W * (FAKE_BPP / 8))  /* 5120 bytes/row */
-#define FAKE_CLK_KHZ   25844u
-#define FAKE_HTOTAL    1400u
-#define FAKE_VTOTAL    260u
+#define FAKE_CLK_KHZ   CDJ3K_JOG_MODE_CLOCK_KHZ
+#define FAKE_HTOTAL    CDJ3K_JOG_MODE_HTOTAL
+#define FAKE_VTOTAL    CDJ3K_JOG_MODE_VTOTAL
 
 #define DRM_MODE_LEN   32
 
@@ -357,6 +358,9 @@ typedef struct {
     uint32_t possible_clones;
 } drm_api_encoder_t;
 
+drm_api_connector_t *drmModeGetConnector(int fd, uint32_t connector_id);
+void drmModeFreeConnector(drm_api_connector_t *ptr);
+
 /* ------------------------------------------------------------------ */
 /* Global variable extern declarations                                */
 /* ------------------------------------------------------------------ */
@@ -441,6 +445,10 @@ void export_jog_prime(int drm_fd, uint32_t gem_handle, uint32_t fb_id);
 
 /* jog.c - synthesised 1280x240@71 mode reused by the connector synthesis path. */
 extern const fake_modeinfo_t g_fake_mode;
+int jog_mode_contract_matches(const fake_modeinfo_t *mode);
+int jog_topology_contract_matches(uint32_t crtc_index, uint32_t connector_type,
+                                  uint32_t connector_type_id, uint32_t possible_crtcs,
+                                  uint32_t encoder_crtc_id, uint32_t requested_crtc_id);
 
 /* jog.c - find the DMA-mapped host pointer for a given DRM fb_id, or NULL if
  * EP122 hasn't mmap'd that buffer yet. Shared by all flip-path ioctls. */

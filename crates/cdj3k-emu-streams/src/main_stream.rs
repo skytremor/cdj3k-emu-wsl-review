@@ -34,6 +34,7 @@ pub const LCD_W: usize = 1280;
 pub const LCD_H: usize = 720;
 
 const SHM_MAGIC: u32 = 0x514D_5348;
+const SHM_FORMAT_RGBA8888: u32 = 1;
 /// Byte offset where pixel data begins in the shm file (public for the GL upload path).
 pub const SHM_PIXELS_OFFSET: usize = 64;
 
@@ -197,6 +198,7 @@ fn poll_loop(
     // Track surface dimensions to detect switches (640×480 → 1280×720).
     let mut last_w: usize = 0;
     let mut last_h: usize = 0;
+    let mut first_frame = true;
 
     loop {
         thread::sleep(POLL_INTERVAL);
@@ -222,21 +224,33 @@ fn poll_loop(
         let width = read_u32(mmap, 8) as usize;
         let height = read_u32(mmap, 12) as usize;
         let stride = read_u32(mmap, 16) as usize;
+        let format = read_u32(mmap, 20);
+
+        let Some(row_bytes) = width.checked_mul(4) else {
+            continue;
+        };
+        let Some(pixel_bytes) = stride.checked_mul(height) else {
+            continue;
+        };
+        let Some(frame_end) = SHM_PIXELS_OFFSET.checked_add(pixel_bytes) else {
+            continue;
+        };
+        if width == 0
+            || height == 0
+            || format != SHM_FORMAT_RGBA8888
+            || stride < row_bytes
+            || frame_end > mmap.len()
+        {
+            continue;
+        }
 
         if let Some(control_gate) = control_gate {
             control_gate.observe_main(gen, width as u32, height as u32);
         }
 
-        if width == 0
-            || height == 0
-            || stride < width * 4
-            || mmap.len() < SHM_PIXELS_OFFSET + stride * height
-        {
-            continue;
-        }
-
         // Reset accumulator on surface dimension change.
-        if width != last_w || height != last_h {
+        let surface_changed = width != last_w || height != last_h;
+        if surface_changed {
             acc = None;
             last_w = width;
             last_h = height;
@@ -248,9 +262,19 @@ fn poll_loop(
         let dw = read_u32(mmap, 32) as usize;
         let dh = read_u32(mmap, 36) as usize;
 
-        if dw == 0 || dh == 0 || dx + dw > width || dy + dh > height {
+        let dirty_valid = dw != 0
+            && dh != 0
+            && dx.checked_add(dw).is_some_and(|end| end <= width)
+            && dy.checked_add(dh).is_some_and(|end| end <= height);
+        if !dirty_valid && !first_frame && !surface_changed {
             continue;
         }
+
+        let (dx, dy, dw, dh) = if first_frame || surface_changed {
+            (0, 0, width, height)
+        } else {
+            (dx, dy, dw, dh)
+        };
 
         // Expand the local accumulator to cover this dirty rect.
         acc = Some(match acc {
@@ -279,6 +303,7 @@ fn poll_loop(
                         stride: stride as u32,
                         mmap: Arc::clone(mmap),
                     });
+                    first_frame = false;
                     gate.request();
                 }
             }

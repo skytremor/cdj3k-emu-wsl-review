@@ -215,6 +215,7 @@ set -euo pipefail
 ROOTFS="${1:?Usage: $0 <initramfs-root>}"
 export ROOTFS
 export PATCH_ASSETS_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATCH_TOOLS_DIR="${PATCH_TOOLS_DIR:-$PATCH_ASSETS_DIR/../tools}"
 # SSH is off by default in shipped builds (no passwordless root in the wild),
 # but respect an explicit ENABLE_SSH=1 from the caller's environment so a
 # developer can `ENABLE_SSH=1 open dist/CDJ3K\ Emulator.app` (or launch via
@@ -233,8 +234,6 @@ HDR
 } > "$RES_PATCH/patch-rootfs.sh"
 chmod +x "$RES_PATCH/patch-rootfs.sh"
 
-[[ -f "$REPO_ROOT/guest/out/cfgd_aarch64" ]] && \
-    cp "$REPO_ROOT/guest/out/cfgd_aarch64" "$RES_PATCH/"
 echo "     bundled merged patch-rootfs.sh (${#PATCH_STEPS[@]} steps inlined)"
 
 # patch/vanilla-modules/  - 6.6 out-of-tree modules for 22-vanilla-kernel-fixups.sh
@@ -269,6 +268,13 @@ for tool in subucom_live subucom_forwarder; do
         echo "WARNING: guest tool not found: $src  (run: ./build.sh --modules-only)"
     fi
 done
+if [[ -f "$REPO_ROOT/guest/out/cfgd_aarch64" ]]; then
+    cp "$REPO_ROOT/guest/out/cfgd_aarch64" "$RES_TOOLS/cfgd"
+    chmod +x "$RES_TOOLS/cfgd"
+    echo "     bundled cfgd"
+else
+    echo "WARNING: guest tool not found: cfgd_aarch64"
+fi
 if [[ -f "$REPO_ROOT/guest/out/ep122_shim.so" ]]; then
     cp "$REPO_ROOT/guest/out/ep122_shim.so" "$RES_TOOLS/ep122_shim.so"
     echo "     bundled ep122_shim.so"

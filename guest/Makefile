@@ -40,7 +40,7 @@ NO_OUTLINE_ATOMICS := $(shell printf 'int main(void){return 0;}\n' \
 #   resolve even if libgcc were dynamic).
 EP122_SHIM_CFLAGS := -O2 -Wall -fPIC -shared -static-libgcc \
                      $(NO_OUTLINE_ATOMICS) \
-                     -finput-charset=utf-8 -fexec-charset=utf-8 -Iep122_shim
+                     -finput-charset=utf-8 -fexec-charset=utf-8 -Iep122_shim -Ikernel-patches
 
 # Static tools: fully self-contained binaries
 TOOL_CFLAGS := -O2 -Wall -Wextra -static
@@ -50,6 +50,7 @@ EP122_SHIM := $(OUT)/ep122_shim.so
 
 # ep122_shim translation units, listed by sub-directory.
 EP122_SHIM_SRCS := ep122_shim/ep122_shim.c ep122_shim/fd.c ep122_shim/jog.c \
+                   ep122_shim/jog_contract.c \
                    ep122_shim/jog_shm.c ep122_shim/jog_drm.c \
                    ep122_shim/syscalls.c ep122_shim/syscalls_io.c \
                    ep122_shim/clock.c ep122_shim/link.c

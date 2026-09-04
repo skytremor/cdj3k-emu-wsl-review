@@ -34,28 +34,6 @@ typedef struct {
 _Static_assert(sizeof(fake_drm_version_t) == 64,
                "fake_drm_version_t must be 64 bytes on aarch64");
 
-/* The 1280×240 @ 71 Hz mode we hand to EP122 (DSI-2, jog LCD).
- * Declared `extern` in shim.h - also consumed by jog_drm.c when synthesising
- * the connector mode list. */
-const fake_modeinfo_t g_fake_mode = {
-    .clock       = FAKE_CLK_KHZ,
-    .hdisplay    = FAKE_W,
-    .hsync_start = FAKE_W + 10,
-    .hsync_end   = FAKE_W + 30,
-    .htotal      = FAKE_HTOTAL,
-    .hskew       = 0,
-    .vdisplay    = FAKE_H,
-    .vsync_start = FAKE_H + 4,
-    .vsync_end   = FAKE_H + 8,
-    .vtotal      = FAKE_VTOTAL,
-    .vscan       = 0,
-    .vrefresh    = 71,
-    .flags       = 0,
-    .type        = 6,   /* DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER */
-    .name        = "1280x240",
-};
-
-
 /* Per-fd flip event state. */
 static jog_flip_slot_t g_jog_flip[MAX_JOG_RENDER_FDS] = {
     {-1,0,0}, {-1,0,0}, {-1,0,0}, {-1,0,0}
@@ -101,6 +79,61 @@ void *jog_dma_for_fb(uint32_t fb_id)
             return g_jog_fbs[i].dma_ptr;
     }
     return NULL;
+}
+
+static int jog_topology_matches(int fd, uint32_t crtc_id, uint32_t connector_id)
+{
+    uint32_t crtc_ids[16] = {0};
+    fake_mode_res_t res;
+    memset(&res, 0, sizeof(res));
+    res.crtc_id_ptr = (uint64_t)(uintptr_t)crtc_ids;
+    res.count_crtcs = 16;
+    if (sys_ioctl(fd, 0xC04064A0u, &res) < 0 || res.count_crtcs < 2 ||
+        res.count_crtcs > 16) {
+        fprintf(stderr, "[ep122_shim] jog SETCRTC guard rejected: invalid CRTC resources\n");
+        return 0;
+    }
+
+    uint32_t crtc_index = res.count_crtcs;
+    for (uint32_t i = 0; i < res.count_crtcs; i++) {
+        if (crtc_ids[i] == crtc_id) {
+            crtc_index = i;
+            break;
+        }
+    }
+    fake_mode_connector_t conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.connector_id = connector_id;
+    if (crtc_index != CDJ3K_JOG_CRTC_INDEX ||
+        sys_ioctl(fd, 0xC05064A7u, &conn) < 0 ||
+        conn.connector_type != CDJ3K_JOG_CONNECTOR_TYPE ||
+        conn.connector_type_id != CDJ3K_JOG_CONNECTOR_TYPE_ID ||
+        conn.count_encoders == 0 || conn.count_encoders > 16) {
+        fprintf(stderr,
+                "[ep122_shim] jog SETCRTC guard rejected: connector/CRTC topology mismatch\n");
+        return 0;
+    }
+
+    uint32_t encoder_ids[16] = {0};
+    uint32_t encoder_capacity = conn.count_encoders;
+    conn.encoders_ptr = (uint64_t)(uintptr_t)encoder_ids;
+    conn.count_encoders = encoder_capacity;
+    conn.modes_ptr = conn.props_ptr = conn.prop_values_ptr = 0;
+    conn.count_modes = conn.count_props = 0;
+    if (sys_ioctl(fd, 0xC05064A7u, &conn) < 0)
+        return 0;
+    for (uint32_t i = 0; i < conn.count_encoders && i < encoder_capacity; i++) {
+        fake_mode_encoder_t enc;
+        memset(&enc, 0, sizeof(enc));
+        enc.encoder_id = encoder_ids[i];
+        if (sys_ioctl(fd, 0xC01464A6u, &enc) == 0 &&
+            jog_topology_contract_matches(crtc_index, conn.connector_type,
+                                           conn.connector_type_id,
+                                           enc.possible_crtcs, enc.crtc_id,
+                                           crtc_id))
+            return 1;
+    }
+    return 0;
 }
 
 static void inject_drm_flip_event(int fd, uint64_t user_data)
@@ -242,18 +275,21 @@ int handle_drm_ioctl(int fd, unsigned long request, void *arg) {
 
     /* SETCRTC (legacy) */
     if (cmd == DRM_CMD_MODE_SETCRTC) {
-        int r = sys_ioctl(fd, request, arg);
-        if (arg) {
-            const fake_mode_crtc_t *crtc = (const fake_mode_crtc_t *)arg;
-            void *src = jog_dma_for_fb(crtc->fb_id);
-            if (src && g_jog_shm_pixels) {
-                __atomic_store_n(&g_jog_current_dma_ptr, src, __ATOMIC_RELEASE);
-                publish_frame(src);
-
-                return 0;
-            }
-        }
-        return r;
+        if (!arg) return sys_ioctl(fd, request, arg);
+        const fake_mode_crtc_t *crtc = (const fake_mode_crtc_t *)arg;
+        const uint32_t *connectors =
+            (const uint32_t *)(uintptr_t)crtc->set_connectors_ptr;
+        void *src = jog_dma_for_fb(crtc->fb_id);
+        if (!src || !g_jog_shm_pixels || !crtc->mode_valid ||
+            crtc->count_connectors != 1 || !connectors ||
+            !jog_mode_contract_matches(&crtc->mode) ||
+            !jog_topology_matches(fd, crtc->crtc_id, connectors[0]))
+            return sys_ioctl(fd, request, arg);
+        __atomic_store_n(&g_jog_current_dma_ptr, src, __ATOMIC_RELEASE);
+        publish_frame(src);
+        fprintf(stderr, "[ep122_shim] jog SETCRTC emulated: mode=%s profile=%s\n",
+                crtc->mode.name, CDJ3K_JOG_SETCRTC_PROFILE_ID);
+        return 0;
     }
 
     /* OBJ_GETPROPS (0xB9) */
@@ -564,4 +600,3 @@ int drmDropMaster(int fd) {
     DBG("drmDropMaster(%d) → 0 (suppressed)\n", fd);
     return 0;
 }
-

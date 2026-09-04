@@ -291,7 +291,6 @@ impl FirmwareWizard {
                     .fill(accent);
                     if ui.add_sized([110.0, 32.0], restart).clicked() {
                         let mut s = menu_state::lock();
-                        s.shade_forced = true;
                         s.restart_requested = true;
                         drop(s);
                         close.store(true, Relaxed);

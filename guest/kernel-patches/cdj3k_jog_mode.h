@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+/* Shared jog timing/topology contract consumed by the kernel and shim. */
+#ifndef CDJ3K_JOG_MODE_H
+#define CDJ3K_JOG_MODE_H
+
+#define CDJ3K_JOG_MODE_CONTRACT_ID "cdj3k-jog-mode-v1"
+#define CDJ3K_JOG_SETCRTC_PROFILE_ID "jog-dsi2-setcrtc-v2"
+#define CDJ3K_JOG_MODE_CLOCK_KHZ 25844u
+#define CDJ3K_JOG_MODE_HDISPLAY 1280u
+#define CDJ3K_JOG_MODE_HSYNC_START 1290u
+#define CDJ3K_JOG_MODE_HSYNC_END 1310u
+#define CDJ3K_JOG_MODE_HTOTAL 1400u
+#define CDJ3K_JOG_MODE_VDISPLAY 240u
+#define CDJ3K_JOG_MODE_VSYNC_START 244u
+#define CDJ3K_JOG_MODE_VSYNC_END 248u
+#define CDJ3K_JOG_MODE_VTOTAL 260u
+#define CDJ3K_JOG_MODE_VREFRESH 71u
+#define CDJ3K_JOG_MODE_HSKEW 0u
+#define CDJ3K_JOG_MODE_VSCAN 0u
+#define CDJ3K_JOG_MODE_FLAGS 0u
+#define CDJ3K_JOG_MODE_TYPE 72u
+#define CDJ3K_JOG_MODE_NAME "1280x240"
+#define CDJ3K_JOG_CONNECTOR_TYPE 16u
+#define CDJ3K_JOG_CONNECTOR_TYPE_ID 2u
+#define CDJ3K_JOG_CRTC_INDEX 1u
+
+#endif

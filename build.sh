@@ -55,6 +55,9 @@ WORKDIR="$REPO_ROOT/build/work"
 ROOTFS_DIR="$WORKDIR/rootfs"
 ROOTFS_MODULES="$ROOTFS_DIR/lib/modules"
 INITRAMFS_ORIG="$REPO_ROOT/build/initramfs-work/initramfs.cpio.gz"
+PATCH_RESOURCES="$WORKDIR/resources"
+PATCH_ASSETS_DIR="$PATCH_RESOURCES/patch"
+PATCH_TOOLS_DIR="$PATCH_RESOURCES/tools"
 
 echo "================================================================"
 echo "  CDJ-3000 build (Linux 6.6 LTS)"
@@ -94,16 +97,17 @@ mkdir -p "$ROOTFS_MODULES"
 echo "      rootfs restored at $ROOTFS_DIR"
 echo ""
 
-# [3/5] Stage modules where patch script 22 can find them
+# [3/5] Stage canonical patch assets and install shared tools into rootfs
 echo "[3/5] Staging out-of-tree modules..."
-VANILLA_MODS_STAGE="$REPO_ROOT/initramfs-patch/vanilla-modules"
-rm -rf "$VANILLA_MODS_STAGE"
-mkdir -p "$VANILLA_MODS_STAGE"
+rm -rf "$PATCH_RESOURCES"
+mkdir -p "$PATCH_ASSETS_DIR/vanilla-modules" "$PATCH_ASSETS_DIR/patch-rootfs.d" "$PATCH_TOOLS_DIR"
 for ko in subucom_virt.ko virtio_snd.ko udev_usb1.ko; do
-    cp "$DOCKER_OUT/modules/$ko" "$VANILLA_MODS_STAGE/"
+    cp "$DOCKER_OUT/modules/$ko" "$PATCH_ASSETS_DIR/vanilla-modules/"
     echo "  ✓  staged $ko"
 done
-cp "$DOCKER_OUT/dummy_drv.so" "$REPO_ROOT/initramfs-patch/dummy_drv.so"
+cp "$DOCKER_OUT/dummy_drv.so" "$PATCH_ASSETS_DIR/dummy_drv.so"
+cp "$DOCKER_OUT/cfgd_aarch64" "$PATCH_TOOLS_DIR/cfgd"
+cp "$REPO_ROOT/initramfs-patch/patch-rootfs.d/"*.sh "$PATCH_ASSETS_DIR/patch-rootfs.d/"
 echo "  ✓  staged dummy_drv.so"
 
 # Install shared tools into rootfs
@@ -138,9 +142,8 @@ echo ""
 
 # [4/5] Apply rootfs patches
 echo "[4/5] Applying rootfs patches..."
-"$REPO_ROOT/initramfs-patch/patch-rootfs.sh" "$ROOTFS_DIR"
-rm -rf "$VANILLA_MODS_STAGE"
-rm -f "$REPO_ROOT/initramfs-patch/dummy_drv.so"
+PATCH_ASSETS_DIR="$PATCH_ASSETS_DIR" PATCH_TOOLS_DIR="$PATCH_TOOLS_DIR" \
+    "$REPO_ROOT/initramfs-patch/patch-rootfs.sh" "$ROOTFS_DIR"
 echo ""
 
 # [5/5] Repack initramfs

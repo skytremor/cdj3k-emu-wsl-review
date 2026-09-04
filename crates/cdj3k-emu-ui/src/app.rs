@@ -34,10 +34,6 @@ pub(crate) use lcd_touch::LcdTouchCapture;
 /// requested a repaint.
 pub(crate) const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
-/// Fresh main-LCD generations to observe after QEMU starts before the boot
-/// spinner overlay is removed.
-const BOOT_FRAMES_THRESHOLD: u32 = 15;
-
 /// Frames the inner window size must remain stable before the aspect-snap
 /// fires (so brief pauses during a drag don't trigger a mid-drag resize).
 const STABLE_FRAMES_REQUIRED: u32 = 8;
@@ -203,16 +199,12 @@ pub struct CdjApp {
 
     wizard: FirmwareWizard,
 
-    /// Frame count from `MainLcdStream` at the moment QEMU was last seen
-    /// transitioning to running. The boot overlay clears once
-    /// `frames_seen() - frame_baseline_at_boot >= BOOT_FRAMES_THRESHOLD`.
-    frame_baseline_at_boot: u32,
     qemu_was_running: bool,
     /// Current rendered alpha of the boot/idle shade in [0, 1]. Linearly ramps
     /// toward the target each frame so the overlay fades in/out over 1 s.
     shade_alpha: f32,
-    /// `true` while the boot guard has not yet cleared (target_alpha > 0).
-    /// Main LCD and jog LCD textures are blanked when this is set.
+    /// `true` while the deliberate shutdown shade is active.
+    /// Main LCD and jog LCD textures are blanked only during that shutdown.
     lcds_blanked: bool,
     /// Set when QEMU exits so the next paint zeroes the main + jog GL textures.
     /// Without this, popouts would keep displaying the last captured frame.
@@ -360,10 +352,9 @@ impl CdjApp {
             jog_dbg_last_omega_sample: 0.0,
             jog_dbg_lines: [String::new(), String::new(), String::new()],
             wizard: FirmwareWizard::new_with_options(options.firmware_resources, options.qemu_img),
-            frame_baseline_at_boot: 0,
             qemu_was_running: false,
-            shade_alpha: 1.0,
-            lcds_blanked: true,
+            shade_alpha: 0.0,
+            lcds_blanked: false,
             lcd_textures_need_blank: false,
             debug_snapshot: Arc::new(Mutex::new(ui::DebugSnapshot::default())),
             debug_viewport_state: Arc::new(Mutex::new(DebugViewportState::default())),
@@ -697,16 +688,14 @@ impl CdjApp {
         }
     }
 
-    /// Step the boot/idle shade alpha toward its target. Returns `(booting,
-    /// target_alpha)` for downstream gating.
+    /// Step the deliberate-shutdown shade alpha toward its target. The
+    /// chassis and LCD placeholders remain visible while QEMU boots or fails;
+    /// stream connection state is rendered by the UI itself.
     fn tick_boot_shade(&mut self, ctx: &egui::Context) -> (bool, f32) {
         let (qemu_running, shade_forced) = {
             let s = menu_state::lock();
             (s.qemu_running, s.shade_forced)
         };
-        if qemu_running && !self.qemu_was_running {
-            self.frame_baseline_at_boot = self.display_stream.frames_seen();
-        }
         // QEMU just exited: blank LCD textures so popout windows go black.
         let qemu_just_exited = self.qemu_was_running && !qemu_running;
         self.qemu_was_running = qemu_running;
@@ -714,12 +703,8 @@ impl CdjApp {
             self.lcd_textures_need_blank = true;
         }
 
-        let frames_since_boot = self
-            .display_stream
-            .frames_seen()
-            .saturating_sub(self.frame_baseline_at_boot);
-        let booting = (qemu_running && frames_since_boot < BOOT_FRAMES_THRESHOLD) || shade_forced;
-        let target_alpha: f32 = if !qemu_running || booting { 1.0 } else { 0.0 };
+        let booting = shade_forced;
+        let target_alpha: f32 = if booting { 1.0 } else { 0.0 };
 
         // Linear ramp toward target (configurable speed).
         let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);

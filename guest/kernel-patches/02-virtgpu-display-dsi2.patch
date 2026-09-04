@@ -2,7 +2,9 @@ diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/v
 index ad924a850..34dd2edbd 100644
 --- a/drivers/gpu/drm/virtio/virtgpu_display.c
 +++ b/drivers/gpu/drm/virtio/virtgpu_display.c
-@@ -164,6 +164,22 @@ static int virtio_gpu_conn_get_modes(struct drm_connector *connector)
+@@ -1,0 +2 @@
++#include "cdj3k_jog_mode.h"
+@@ -164,6 +164,31 @@ static int virtio_gpu_conn_get_modes(struct drm_connector *connector)
  	struct drm_display_mode *mode = NULL;
  	int count, width, height;
  
@@ -13,11 +15,20 @@ index ad924a850..34dd2edbd 100644
 +	 * so it must be present in the kernel mode list.
 +	 */
 +	if (output->index == 1) {
-+		mode = drm_cvt_mode(connector->dev, 1280, 240, 71,
-+				    false, false, false);
++		mode = drm_mode_create(connector->dev);
 +		if (!mode)
 +			return 0;
-+		mode->type |= DRM_MODE_TYPE_PREFERRED;
++		mode->clock = CDJ3K_JOG_MODE_CLOCK_KHZ;
++		mode->hdisplay = CDJ3K_JOG_MODE_HDISPLAY;
++		mode->hsync_start = CDJ3K_JOG_MODE_HSYNC_START;
++		mode->hsync_end = CDJ3K_JOG_MODE_HSYNC_END;
++		mode->htotal = CDJ3K_JOG_MODE_HTOTAL;
++		mode->vdisplay = CDJ3K_JOG_MODE_VDISPLAY;
++		mode->vsync_start = CDJ3K_JOG_MODE_VSYNC_START;
++		mode->vsync_end = CDJ3K_JOG_MODE_VSYNC_END;
++		mode->vtotal = CDJ3K_JOG_MODE_VTOTAL;
++		mode->type = CDJ3K_JOG_MODE_TYPE;
++		drm_mode_set_name(mode);
 +		drm_mode_probed_add(connector, mode);
 +		return 1;
 +	}
@@ -86,7 +97,7 @@ index ad924a850..34dd2edbd 100644
 -	for (i = 0 ; i < vgdev->num_scanouts; ++i)
 +	/*
 +	 * cdj3k-emu: always init at least 2 outputs. QEMU is configured
-+	 * with max_outputs=1 but EP122 requires a second synthetic output
++	 * with max_outputs=2 and EP122 requires a second synthetic output
 +	 * (index 1, DSI-2) for the jog LCD.  outputs[] has VIRTIO_GPU_MAX_SCANOUTS
 +	 * (16) slots so index 1 is always safe to use.
 +	 */

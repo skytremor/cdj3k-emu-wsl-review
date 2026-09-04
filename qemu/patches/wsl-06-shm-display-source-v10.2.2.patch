@@ -1,0 +1,111 @@
+diff --git a/ui/shm-display.c b/ui/shm-display.c
+new file mode 100644
+index 0000000..c3b7e60
+--- /dev/null
++++ b/ui/shm-display.c
+@@ -0,0 +1,105 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#include "qemu/osdep.h"
++#include "ui/console.h"
++#include "qapi/qapi-types-ui.h"
++#include "qemu/module.h"
++#include "qemu/error-report.h"
++#include <sys/mman.h>
++#include <fcntl.h>
++
++#define SHM_MAGIC UINT32_C(0x514D5348)
++#define SHM_PIXELS_OFFSET UINT32_C(64)
++#define SHM_FORMAT_RGBA8888 UINT32_C(1)
++typedef struct ShmHdr {
++    uint32_t magic, generation, width, height, stride, format;
++    uint32_t dirty_x, dirty_y, dirty_w, dirty_h;
++    uint8_t padding[SHM_PIXELS_OFFSET - 40];
++} ShmHdr;
++typedef struct ShmDisplay {
++    DisplayChangeListener dcl;
++    DisplaySurface *surface;
++    char *path;
++    ShmHdr *hdr;
++    size_t map_size;
++} ShmDisplay;
++
++static int shm_remap(ShmDisplay *s, uint32_t w, uint32_t h, uint32_t stride)
++{
++    if (stride == 0 || h > (SIZE_MAX - SHM_PIXELS_OFFSET) / stride) {
++        error_report("shm-display: framebuffer size overflow");
++        return -1;
++    }
++    size_t size = SHM_PIXELS_OFFSET + (size_t)stride * h;
++    if (s->hdr && s->map_size == size) return 0;
++    if (s->hdr) munmap(s->hdr, s->map_size);
++    int fd = open(s->path, O_RDWR | O_CREAT, 0600);
++    if (fd < 0) return -1;
++    struct stat st;
++    if (fstat(fd, &st) < 0) {
++        close(fd);
++        return -1;
++    }
++    if ((size_t)st.st_size < size && ftruncate(fd, (off_t)size) < 0) {
++        close(fd);
++        return -1;
++    }
++    void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (map == MAP_FAILED) return -1;
++    s->hdr = map; s->map_size = size;
++    memset(s->hdr, 0, SHM_PIXELS_OFFSET);
++    s->hdr->magic = SHM_MAGIC; s->hdr->width = w; s->hdr->height = h;
++    s->hdr->stride = stride; s->hdr->format = SHM_FORMAT_RGBA8888;
++    return 0;
++}
++
++static void shm_update(DisplayChangeListener *dcl, int x, int y, int w, int h)
++{
++    ShmDisplay *s = container_of(dcl, ShmDisplay, dcl);
++    if (!s->hdr || !s->surface || w <= 0 || h <= 0) return;
++    int bpp = surface_bytes_per_pixel(s->surface), src_stride = surface_stride(s->surface);
++    if (bpp != 4 || src_stride <= 0 || x < 0 || y < 0 ||
++        (size_t)x > SIZE_MAX / (size_t)bpp ||
++        (size_t)y > SIZE_MAX / (size_t)src_stride ||
++        (size_t)x > surface_width(s->surface) ||
++        (size_t)y > surface_height(s->surface) ||
++        (size_t)w > (size_t)surface_width(s->surface) - (size_t)x ||
++        (size_t)h > (size_t)surface_height(s->surface) - (size_t)y) {
++        error_report("shm-display: unsupported or out-of-bounds surface update");
++        return;
++    }
++    uint8_t *src = surface_data(s->surface) + (size_t)y * src_stride + (size_t)x * bpp;
++    uint8_t *dst = (uint8_t *)s->hdr + SHM_PIXELS_OFFSET + (size_t)y * s->hdr->stride + (size_t)x * bpp;
++    for (int row = 0; row < h; row++, src += src_stride, dst += s->hdr->stride) {
++        const uint32_t *from = (const uint32_t *)src; uint32_t *to = (uint32_t *)dst;
++        for (int col = 0; col < w; col++) {
++            uint32_t p = from[col];
++            to[col] = 0xFF000000u | ((p << 16) & 0x00FF0000u) |
++                      (p & 0x0000FF00u) | ((p >> 16) & 0xFFu);
++        }
++    }
++    s->hdr->dirty_x = x; s->hdr->dirty_y = y; s->hdr->dirty_w = w; s->hdr->dirty_h = h;
++    __atomic_fetch_add(&s->hdr->generation, 1u, __ATOMIC_RELEASE);
++}
++static void shm_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
++{
++    ShmDisplay *s = container_of(dcl, ShmDisplay, dcl); s->surface = surface;
++    if (surface && shm_remap(s, surface_width(surface), surface_height(surface), surface_stride(surface)) == 0)
++        shm_update(dcl, 0, 0, surface_width(surface), surface_height(surface));
++}
++static void shm_refresh(DisplayChangeListener *dcl) { graphic_hw_update(dcl->con); }
++static const DisplayChangeListenerOps shm_ops = {
++    .dpy_name = "shm", .dpy_gfx_update = shm_update,
++    .dpy_gfx_switch = shm_switch, .dpy_refresh = shm_refresh,
++};
++static void shm_display_init(DisplayState *ds, DisplayOptions *opts)
++{
++    ShmDisplay *s = g_new0(ShmDisplay, 1); s->path = g_strdup(opts->u.shm.path);
++    s->dcl.ops = &shm_ops;
++    for (unsigned i = 0;; i++) { QemuConsole *c = qemu_console_lookup_by_index(i); if (!c) break;
++        if (qemu_console_is_graphic(c)) { s->dcl.con = c; break; } }
++    register_displaychangelistener(&s->dcl);
++}
++static QemuDisplay qemu_display_shm = { .type = DISPLAY_TYPE_SHM, .init = shm_display_init };
++static void shm_display_register(void) { qemu_display_register(&qemu_display_shm); }
++type_init(shm_display_register);

@@ -162,15 +162,11 @@ pub fn patch_initramfs(
     resources_dir: &Path,
     out_path: &Path,
 ) -> Result<(), PatchError> {
+    validate_patch_resources(resources_dir)?;
+
     let modules_dir = resources_dir.join("modules");
     let patch_dir = resources_dir.join("patch");
     let tools_dir = resources_dir.join("tools");
-
-    for req in [&modules_dir, &patch_dir] {
-        if !req.exists() {
-            return Err(PatchError::MissingResource(req.display().to_string()));
-        }
-    }
 
     // Create a temp working directory.
     let tmp = tmp_dir("cdj3k-emu-initramfs")?;
@@ -192,23 +188,21 @@ pub fn patch_initramfs(
     }
 
     // 3. Inject guest tools (aarch64 ELFs) into rootfs/usr/bin/.
-    if tools_dir.exists() {
-        let bin_dst = rootfs.join("usr/bin");
-        std::fs::create_dir_all(&bin_dst)?;
-        let home_dst = rootfs.join("home/root");
-        std::fs::create_dir_all(&home_dst)?;
+    let bin_dst = rootfs.join("usr/bin");
+    std::fs::create_dir_all(&bin_dst)?;
+    let home_dst = rootfs.join("home/root");
+    std::fs::create_dir_all(&home_dst)?;
 
-        for entry in std::fs::read_dir(&tools_dir)? {
-            let src = entry?.path();
-            let name = src.file_name().unwrap().to_string_lossy().to_string();
-            let dst = if name == "ep122_shim.so" {
-                home_dst.join(&name)
-            } else {
-                bin_dst.join(&name)
-            };
-            std::fs::copy(&src, &dst)?;
-            set_executable(&dst)?;
-        }
+    for entry in std::fs::read_dir(&tools_dir)? {
+        let src = entry?.path();
+        let name = src.file_name().unwrap().to_string_lossy().to_string();
+        let dst = if name == "ep122_shim.so" {
+            home_dst.join(&name)
+        } else {
+            bin_dst.join(&name)
+        };
+        std::fs::copy(&src, &dst)?;
+        set_executable(&dst)?;
     }
 
     // 4. Run patch-rootfs.sh from the bundled patch directory.
@@ -223,6 +217,7 @@ pub fn patch_initramfs(
         .arg(&rootfs)
         .env("ROOTFS", &rootfs)
         .env("PATCH_ASSETS_DIR", &patch_dir)
+        .env("PATCH_TOOLS_DIR", &tools_dir)
         .status()?;
     if !status.success() {
         return Err(PatchError::CommandFailed(format!(
@@ -250,6 +245,36 @@ pub fn patch_initramfs(
     // 8. Clean up temp dir.
     let _ = std::fs::remove_dir_all(&tmp);
 
+    Ok(())
+}
+
+fn validate_patch_resources(resources_dir: &Path) -> Result<(), PatchError> {
+    let required = [
+        "modules/subucom_virt.ko",
+        "modules/virtio_snd.ko",
+        "modules/udev_usb1.ko",
+        "tools/ep122_shim.so",
+        "tools/subucom_forwarder",
+        "tools/subucom_live",
+        "tools/cfgd",
+        "patch/patch-rootfs.sh",
+        "patch/dummy_drv.so",
+        "patch/vanilla-modules/subucom_virt.ko",
+        "patch/vanilla-modules/virtio_snd.ko",
+        "patch/vanilla-modules/udev_usb1.ko",
+    ];
+    for relative in required {
+        let path = resources_dir.join(relative);
+        if !path.is_file() {
+            return Err(PatchError::MissingResource(path.display().to_string()));
+        }
+    }
+    let patch_scripts = resources_dir.join("patch/patch-rootfs.d");
+    if !patch_scripts.is_dir() {
+        return Err(PatchError::MissingResource(
+            patch_scripts.display().to_string(),
+        ));
+    }
     Ok(())
 }
 

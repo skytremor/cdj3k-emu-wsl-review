@@ -410,17 +410,14 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
             s.firmware_wizard_requested = true;
         }
         "restart" => {
-            s.shade_forced = true;
             s.restart_requested = true;
         }
         "service_mode" => {
             s.service_mode = !s.service_mode;
-            s.shade_forced = true;
             s.restart_requested = true;
         }
         "audio" => {
             s.audio_enabled = !s.audio_enabled;
-            s.shade_forced = true;
             s.audio_toggle_requested = true;
         }
         "alc" => {
@@ -441,15 +438,9 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
         "main_screen" => s.main_screen_popped = !s.main_screen_popped,
         "debug_screen" => s.debug_screen_popped = !s.debug_screen_popped,
         "net_none" => {
-            if s.selected_interface != menu_state::NET_SEL_NONE {
-                s.shade_forced = true;
-            }
             s.selected_interface = menu_state::NET_SEL_NONE;
         }
         "net_vmnet_host" => {
-            if s.selected_interface != menu_state::NET_SEL_VMNET_HOST {
-                s.shade_forced = true;
-            }
             s.selected_interface = menu_state::NET_SEL_VMNET_HOST;
         }
         "create_virtual_usb" => {
@@ -465,7 +456,6 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
             if s.audio_device_uid.is_some() {
                 s.audio_device_uid = None;
                 s.audio_device_toggle_requested = true;
-                s.shade_forced = true;
             }
         }
         other => {
@@ -477,14 +467,10 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
                     if s.audio_device_uid.as_deref() != Some(uid.as_str()) {
                         s.audio_device_uid = Some(uid);
                         s.audio_device_toggle_requested = true;
-                        s.shade_forced = true;
                     }
                 }
             } else if let Some(rest) = other.strip_prefix("net_if_") {
                 if let Ok(n) = rest.parse::<u32>() {
-                    if s.selected_interface != n {
-                        s.shade_forced = true;
-                    }
                     s.selected_interface = n;
                 }
             } else if let Some(rest) = other.strip_prefix("phys_select_") {

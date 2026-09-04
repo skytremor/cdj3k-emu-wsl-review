@@ -9,13 +9,15 @@
 #
 # Each script in patch-rootfs.d/ receives two environment variables:
 #   ROOTFS           - path to the extracted initramfs rootfs (from $1)
-#   PATCH_ASSETS_DIR - path to this directory (contains cfgd_aarch64 binary from tools/)
+#   PATCH_ASSETS_DIR - path to this directory (contains patch assets)
+#   PATCH_TOOLS_DIR  - canonical sibling tools directory
 
 set -euo pipefail
 
 ROOTFS="${1:?Usage: $0 <initramfs-root>}"
 export ROOTFS
-export PATCH_ASSETS_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATCH_ASSETS_DIR="${PATCH_ASSETS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+export PATCH_TOOLS_DIR="${PATCH_TOOLS_DIR:-${PATCH_ASSETS_DIR}/../tools}"
 
 PATCH_D="$PATCH_ASSETS_DIR/patch-rootfs.d"
 

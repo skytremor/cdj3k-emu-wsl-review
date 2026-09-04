@@ -17,17 +17,14 @@
 set -euo pipefail
 : "${ROOTFS:?ROOTFS must be set by dispatcher}"
 : "${PATCH_ASSETS_DIR:?PATCH_ASSETS_DIR must be set by dispatcher}"
+: "${PATCH_TOOLS_DIR:?PATCH_TOOLS_DIR must be set by dispatcher}"
 
-# cfgd_aarch64 lives in PATCH_ASSETS_DIR when called from the .app bundle
-# (bundle.sh copies it from guest/out/), or in guest/out/ when called
-# directly from build-initramfs.sh.
-if [[ -f "$PATCH_ASSETS_DIR/cfgd_aarch64" ]]; then
-    CFGD_BIN="$PATCH_ASSETS_DIR/cfgd_aarch64"
-elif [[ -f "$PATCH_ASSETS_DIR/../guest/out/cfgd_aarch64" ]]; then
-    CFGD_BIN="$PATCH_ASSETS_DIR/../guest/out/cfgd_aarch64"
-else
-    echo "ERROR: cfgd_aarch64 not found in $PATCH_ASSETS_DIR or guest/out/" >&2
-    echo "       Run: cd guest && make docker" >&2
+# The WSL resource assembler places cfgd at the canonical tools path. The
+# provisioner validates this bundle before the wizard is shown, so do not
+# search unrelated build trees or silently mix artifact generations.
+CFGD_BIN="$PATCH_TOOLS_DIR/cfgd"
+if [[ ! -f "$CFGD_BIN" ]]; then
+    echo "ERROR: canonical cfgd resource is missing: $CFGD_BIN" >&2
     exit 1
 fi
 install -m 0755 "$CFGD_BIN" "$ROOTFS/usr/sbin/cdj3k-cfgd"

@@ -59,8 +59,9 @@ do with real CDJs on a physical LAN when you're on vacation.
 > - Not a turntable replacement. Jog wheel and rotary feel are reproduced via
 >   pointer drag + scroll wheel; there's no support for an external MIDI
 >   controller bridging into the emulated SPI bus.
-> - Not currently portable. Apple Silicon macOS only (HVF, vmnet.framework,
->   AppKit window/menu, CoreAudio). Linux/Windows are out of scope for v0.1.
+> - The original app targets Apple Silicon macOS (HVF, vmnet.framework, AppKit,
+>   and CoreAudio). A separate `cdj3k-emu-wsl` Linux/WSL2 port is included for
+>   WSLg + QEMU TCG; see [Linux and WSL2](docs/linux-wsl.md).
 > - **Not compatible with pre-3.00 firmware.** See _Firmware compatibility_
 >   below — only CDJ-3000 firmware 3.00 and newer are accepted.
 
@@ -191,6 +192,8 @@ privileges — every elevation is scoped to one command.
 
 
 ## Documentation and reference
+
+- [Linux and WSL2](docs/linux-wsl.md)
 
 - [Audio stack](docs/audio-stack.md)
 - [ALC](docs/alc.md)
