@@ -2,7 +2,9 @@
 //!
 //! The control stream is deliberately opened only after the current QEMU
 //! launch has produced a real main frame and two stable jog seqlock advances.
-//! This prevents stale `ctrl.sock` consumers surviving a restart epoch.
+//! This prevents stale `ctrl.sock` consumers surviving a restart epoch. The
+//! serial Application Started marker is retained as a diagnostic milestone,
+//! but is not a prerequisite for independent display readiness.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -57,7 +59,8 @@ impl ControlConnectionGate {
     }
 
     /// Mark the serial milestone for `epoch`. A stale observer cannot release
-    /// a later launch; display readiness is still required by `is_ready`.
+    /// a later launch. This is diagnostic only; display readiness is checked
+    /// independently by `is_ready`.
     pub fn release(&self, epoch: LaunchEpoch) -> bool {
         if self.epoch.load(Ordering::Acquire) != epoch.0 {
             return false;
@@ -90,8 +93,7 @@ impl ControlConnectionGate {
 
     pub fn is_ready(&self) -> bool {
         let epoch = self.epoch.load(Ordering::Acquire);
-        self.application_started_epoch.load(Ordering::Acquire) == epoch
-            && self.main_ready_epoch.load(Ordering::Acquire) == epoch
+        self.main_ready_epoch.load(Ordering::Acquire) == epoch
             && self.jog_ready_epoch.load(Ordering::Acquire) == epoch
     }
 
@@ -111,19 +113,28 @@ mod tests {
     use super::ControlConnectionGate;
 
     #[test]
-    fn requires_serial_main_and_two_jog_advances_per_epoch() {
+    fn requires_main_and_two_jog_advances_without_serial_dependency() {
         let gate = ControlConnectionGate::new();
-        let epoch = gate.begin_launch();
+        gate.begin_launch();
         gate.observe_main(1, 1280, 720);
         gate.observe_jog(2);
         assert!(!gate.is_ready());
         gate.observe_jog(4);
-        assert!(!gate.is_ready());
-        assert!(gate.release(epoch));
         assert!(gate.is_ready());
 
         gate.begin_launch();
         assert!(!gate.is_ready());
+    }
+
+    #[test]
+    fn readiness_order_is_independent() {
+        let gate = ControlConnectionGate::new();
+        gate.begin_launch();
+        gate.observe_jog(2);
+        gate.observe_jog(4);
+        assert!(!gate.is_ready());
+        gate.observe_main(1, 1280, 720);
+        assert!(gate.is_ready());
     }
 
     #[test]

@@ -60,16 +60,9 @@ impl CdjApp {
             self.display_tex_id = Some(tex_id);
         }
 
-        // Zero-copy upload: shm pixels are RGBA8888 (QEMU converts XRGB→RGBA
-        // in shm_gfx_update); UNPACK_ROW_LENGTH lets us point directly into
-        // the mmap without any row copy, even for dirty sub-rects.
+        // The stream supplies an owned, stable RGBA8888 snapshot (QEMU
+        // converts XRGB→RGBA on its side), packed one row after another.
         if let Some(tex) = self.display_gl_tex {
-            let offset = main_stream::SHM_PIXELS_OFFSET
-                + dirty.y as usize * dirty.stride as usize
-                + dirty.x as usize * PX_BYTES;
-            // Minimum slice: full rows except last (which only needs w*4 bytes).
-            let len = (dirty.h as usize - 1) * dirty.stride as usize + dirty.w as usize * PX_BYTES;
-            let pixels = &dirty.mmap[offset..offset + len];
             unsafe {
                 upload_sub_image(
                     &gl,
@@ -79,7 +72,7 @@ impl CdjApp {
                     dirty.y as i32,
                     dirty.w as i32,
                     dirty.h as i32,
-                    pixels,
+                    &dirty.pixels,
                 );
             }
         }

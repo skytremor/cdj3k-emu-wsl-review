@@ -15,7 +15,9 @@
 //!   [64]  u8[] pixels      stride × height bytes
 //!
 //! The reader polls `generation` with Acquire semantics; when it changes,
-//! dirty_x/y/w/h and pixel data are coherent.
+//! dirty_x/y/w/h and pixel data are copied into an owned buffer and the
+//! generation is checked again before publication. This prevents QEMU from
+//! modifying the live mmap while the UI/OpenGL thread consumes a frame.
 //!
 //! Pixel format: format=1 (RGBA8888, R,G,B,A byte order).
 //! shm_gfx_update converts XRGB8888→RGBA8888 on the QEMU side so the host
@@ -44,18 +46,16 @@ const POLL_INTERVAL: Duration = Duration::from_micros(500);
 /// Backoff between "shm not yet present" / "magic gone" retries.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
-/// A dirty-region notification - carries the mmap reference so the UI thread can
-/// upload directly to the GPU without any intermediate pixel copy.
+/// A dirty-region notification with an owned, stable pixel snapshot.
 pub struct DisplayDirty {
     pub x: u32,
     pub y: u32,
     pub w: u32,
     pub h: u32,
-    /// Row stride in bytes (= shm header `stride` field).
+    /// Row stride in bytes. For owned snapshots this is `w * 4`.
     pub stride: u32,
-    /// Shared reference to the shm mapping; pixels live at
-    /// `mmap[SHM_PIXELS_OFFSET + y*stride + x*4 ..]`.
-    pub mmap: Arc<Mmap>,
+    /// Packed RGBA rows for this dirty rectangle.
+    pub pixels: Vec<u8>,
 }
 
 /// Background-thread shm reader for the main LCD.
@@ -217,8 +217,6 @@ fn poll_loop(
         }
         puffin::profile_scope!("main_lcd_gen_bump");
         last_gen = gen;
-        frames_seen.fetch_add(1, Ordering::Relaxed);
-
         // Re-read dimensions on every frame - the surface can switch
         // mid-session (e.g. initial 640×480 QEMU console → 1280×720 Xorg).
         let width = read_u32(mmap, 8) as usize;
@@ -226,21 +224,7 @@ fn poll_loop(
         let stride = read_u32(mmap, 16) as usize;
         let format = read_u32(mmap, 20);
 
-        let Some(row_bytes) = width.checked_mul(4) else {
-            continue;
-        };
-        let Some(pixel_bytes) = stride.checked_mul(height) else {
-            continue;
-        };
-        let Some(frame_end) = SHM_PIXELS_OFFSET.checked_add(pixel_bytes) else {
-            continue;
-        };
-        if width == 0
-            || height == 0
-            || format != SHM_FORMAT_RGBA8888
-            || stride < row_bytes
-            || frame_end > mmap.len()
-        {
+        if !valid_frame(width, height, stride, format, mmap.len()) {
             continue;
         }
 
@@ -293,23 +277,85 @@ fn poll_loop(
                     let uw = x1 - x0;
                     let uh = y1 - y0;
 
-                    // Zero-copy: share the mmap reference so the UI thread
-                    // uploads directly from the shm file into the GPU texture.
-                    *g = Some(DisplayDirty {
-                        x: x0 as u32,
-                        y: y0 as u32,
-                        w: uw as u32,
-                        h: uh as u32,
-                        stride: stride as u32,
-                        mmap: Arc::clone(mmap),
-                    });
-                    first_frame = false;
-                    gate.request();
+                    if let Some(pixels) =
+                        copy_stable_rect(mmap, gen, x0, y0, uw, uh, stride, width, height)
+                    {
+                        *g = Some(DisplayDirty {
+                            x: x0 as u32,
+                            y: y0 as u32,
+                            w: uw as u32,
+                            h: uh as u32,
+                            stride: (uw * 4) as u32,
+                            pixels,
+                        });
+                        frames_seen.fetch_add(1, Ordering::Relaxed);
+                        first_frame = false;
+                        gate.request();
+                    } else {
+                        acc = Some((x0, y0, x1, y1));
+                    }
                 }
             }
             // Slot busy: keep accumulating, don't take() so acc remains set.
         }
     }
+}
+
+fn valid_frame(width: usize, height: usize, stride: usize, format: u32, map_len: usize) -> bool {
+    let Some(row_bytes) = width.checked_mul(4) else {
+        return false;
+    };
+    let Some(pixel_bytes) = stride.checked_mul(height) else {
+        return false;
+    };
+    let Some(frame_end) = SHM_PIXELS_OFFSET.checked_add(pixel_bytes) else {
+        return false;
+    };
+    width != 0
+        && height != 0
+        && format == SHM_FORMAT_RGBA8888
+        && stride >= row_bytes
+        && frame_end <= map_len
+}
+
+fn copy_stable_rect(
+    mmap: &Mmap,
+    generation: u32,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    surface_width: usize,
+    surface_height: usize,
+) -> Option<Vec<u8>> {
+    if width == 0
+        || height == 0
+        || x.checked_add(width)? > surface_width
+        || y.checked_add(height)? > surface_height
+    {
+        return None;
+    }
+    let row_bytes = width.checked_mul(4)?;
+    let total_bytes = row_bytes.checked_mul(height)?;
+    let mut pixels = vec![0u8; total_bytes];
+    for row in 0..height {
+        let source_row = y.checked_add(row)?;
+        let source_offset = SHM_PIXELS_OFFSET
+            .checked_add(source_row.checked_mul(stride)?)?
+            .checked_add(x.checked_mul(4)?)?;
+        let source_end = source_offset.checked_add(row_bytes)?;
+        if source_end > mmap.len() {
+            return None;
+        }
+        let target_offset = row.checked_mul(row_bytes)?;
+        pixels[target_offset..target_offset + row_bytes]
+            .copy_from_slice(&mmap[source_offset..source_end]);
+    }
+    if read_u32_acquire(mmap, 4) != generation {
+        return None;
+    }
+    Some(pixels)
 }
 
 // ---------------------------------------------------------------------------
@@ -348,4 +394,70 @@ fn read_u32_acquire(mmap: &Mmap, offset: usize) -> u32 {
     // own synchronisation, and the QEMU side performs only atomic
     // accesses to the same word.
     unsafe { (*ptr).load(Ordering::Acquire) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_stable_rect, valid_frame, SHM_FORMAT_RGBA8888, SHM_MAGIC, SHM_PIXELS_OFFSET};
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    #[test]
+    fn rejects_invalid_frame_headers() {
+        assert!(!valid_frame(0, 720, 5120, SHM_FORMAT_RGBA8888, 8 << 20));
+        assert!(!valid_frame(1280, 720, 5120, 0, 8 << 20));
+        assert!(!valid_frame(
+            1280,
+            720,
+            5120,
+            SHM_FORMAT_RGBA8888,
+            SHM_PIXELS_OFFSET
+        ));
+        assert!(!valid_frame(
+            usize::MAX,
+            2,
+            usize::MAX,
+            SHM_FORMAT_RGBA8888,
+            usize::MAX
+        ));
+    }
+
+    #[test]
+    fn copies_owned_rect_only_after_stable_generation() {
+        let path = std::env::temp_dir().join(format!(
+            "cdj3k-main-stream-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let size = SHM_PIXELS_OFFSET + 32 + 16;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(size as u64).unwrap();
+        let mut header = [0u8; SHM_PIXELS_OFFSET];
+        header[0..4].copy_from_slice(&SHM_MAGIC.to_le_bytes());
+        header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        header[8..12].copy_from_slice(&4u32.to_le_bytes());
+        header[12..16].copy_from_slice(&2u32.to_le_bytes());
+        header[16..20].copy_from_slice(&16u32.to_le_bytes());
+        header[20..24].copy_from_slice(&SHM_FORMAT_RGBA8888.to_le_bytes());
+        file.write_all(&header).unwrap();
+        file.write_all(&(0u32).to_le_bytes()).unwrap();
+        file.write_all(&(0u32).to_le_bytes()).unwrap();
+        file.write_all(&(4u32).to_le_bytes()).unwrap();
+        file.write_all(&(2u32).to_le_bytes()).unwrap();
+        file.write_all(&[0x11; 32]).unwrap();
+        file.sync_all().unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        let pixels = copy_stable_rect(&mmap, 1, 0, 0, 4, 2, 16, 4, 2).unwrap();
+        assert_eq!(pixels.len(), 32);
+        std::fs::remove_file(path).unwrap();
+    }
 }
