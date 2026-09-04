@@ -390,6 +390,7 @@ impl CdjApp {
     }
 }
 
+#[cfg(target_os = "macos")]
 static MENU_SETUP: std::sync::Once = std::sync::Once::new();
 
 impl eframe::App for CdjApp {
@@ -436,8 +437,11 @@ impl eframe::App for CdjApp {
 
         self.snap_window_aspect(ctx);
 
+        #[cfg(target_os = "macos")]
         MENU_SETUP.call_once(cdj3k_emu_platform::menu::setup_menu);
         self.poll_menu_state();
+        #[cfg(target_os = "linux")]
+        self.draw_linux_operator_bar(ctx);
 
         // Blank LCD textures after a QEMU exit so popouts go black instead
         // of holding the last captured frame.
@@ -578,6 +582,7 @@ impl eframe::App for CdjApp {
             s.debug_screen_popped = self.debug_screen_popped;
         }
 
+        #[cfg(target_os = "macos")]
         cdj3k_emu_platform::menu::sync_menu();
 
         // Bloom composite - fires last; thresholds + blurs scene_tex, writes
@@ -635,6 +640,148 @@ impl eframe::App for CdjApp {
 const SHUTDOWN_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(35);
 
 impl CdjApp {
+    #[cfg(target_os = "linux")]
+    fn draw_linux_operator_bar(&self, ctx: &egui::Context) {
+        let (
+            qemu_running,
+            service_mode,
+            audio_enabled,
+            alc_enabled,
+            jog_screen,
+            main_screen,
+            debug_screen,
+            usb_mounted,
+            audio_device_uid,
+            audio_devices,
+            latency,
+        ) = {
+            let s = menu_state::lock();
+            (
+                s.qemu_running,
+                s.service_mode,
+                s.audio_enabled,
+                s.alc_enabled,
+                s.jog_screen_popped,
+                s.main_screen_popped,
+                s.debug_screen_popped,
+                s.usb_virtual_mounted,
+                s.audio_device_uid.clone(),
+                s.audio_devices.clone(),
+                menu_state::unpack_latency(s.latency_packed),
+            )
+        };
+
+        egui::TopBottomPanel::top("linux_operator_bar")
+            .frame(egui::Frame::none().fill(egui::Color32::from_rgb(28, 30, 34)))
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.menu_button("Emulation", |ui| {
+                        if ui.button("Install Firmware…").clicked() {
+                            cdj3k_emu_platform::menu::trigger_action("install_firmware");
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(qemu_running, egui::Button::new("Restart Emulation"))
+                            .clicked()
+                        {
+                            cdj3k_emu_platform::menu::trigger_action("restart");
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(qemu_running, egui::Button::new("Stop Emulation"))
+                            .clicked()
+                        {
+                            cdj3k_emu_platform::menu::trigger_action("stop");
+                            ui.close_menu();
+                        }
+                        let mut service = service_mode;
+                        if ui.checkbox(&mut service, "Service Mode").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("service_mode");
+                        }
+                    });
+
+                    ui.menu_button("Storage", |ui| {
+                        if ui.button("Mount Image…").clicked() {
+                            cdj3k_emu_platform::menu::trigger_action("mount_virtual_usb");
+                            ui.close_menu();
+                        }
+                        if ui.button("Create Image…").clicked() {
+                            cdj3k_emu_platform::menu::trigger_action("create_virtual_usb");
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(usb_mounted, egui::Button::new("Eject Current Media"))
+                            .clicked()
+                        {
+                            cdj3k_emu_platform::menu::trigger_action("eject_current_media");
+                            ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button("Audio", |ui| {
+                        let mut enabled = audio_enabled;
+                        if ui.checkbox(&mut enabled, "Enable Audio").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("audio");
+                        }
+                        let mut alc = alc_enabled;
+                        if ui.checkbox(&mut alc, "Enable ALC").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("alc");
+                        }
+                        ui.separator();
+                        ui.label("Output Device");
+                        if ui
+                            .selectable_label(audio_device_uid.is_none(), "System Default")
+                            .clicked()
+                        {
+                            cdj3k_emu_platform::menu::trigger_action("audio_dev_default");
+                        }
+                        for device in &audio_devices {
+                            if ui
+                                .selectable_label(
+                                    audio_device_uid.as_deref() == Some(device.uid.as_str()),
+                                    &device.name,
+                                )
+                                .clicked()
+                            {
+                                let mut id = String::from("audio_dev_uid_");
+                                for byte in device.uid.as_bytes() {
+                                    use std::fmt::Write;
+                                    let _ = write!(id, "{byte:02x}");
+                                }
+                                cdj3k_emu_platform::menu::trigger_action(&id);
+                            }
+                        }
+                    });
+
+                    ui.menu_button("View", |ui| {
+                        let mut jog = jog_screen;
+                        if ui.checkbox(&mut jog, "External Jog Screen").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("jog_screen");
+                        }
+                        let mut main = main_screen;
+                        if ui.checkbox(&mut main, "External Main Screen").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("main_screen");
+                        }
+                        let mut debug = debug_screen;
+                        if ui.checkbox(&mut debug, "Debug Panel").changed() {
+                            cdj3k_emu_platform::menu::trigger_action("debug_screen");
+                        }
+                    });
+
+                    let qemu_label = if qemu_running {
+                        "QEMU: running"
+                    } else {
+                        "QEMU: stopped"
+                    };
+                    ui.separator();
+                    ui.label(qemu_label);
+                    if let Some((total, guest, host)) = latency {
+                        ui.label(format!("Latency {total} ms ({guest}+{host})"));
+                    }
+                });
+            });
+    }
+
     /// Snap the inner window aspect to the layout reference once a resize
     /// has settled. `setContentAspectRatio` only constrains *future*
     /// resizes; if the window comes up at the wrong aspect (e.g. autosaved

@@ -381,6 +381,31 @@ pub fn sync_menu() {
     });
 }
 
+/// Dispatch an operator action from a platform-native UI. Linux uses this
+/// entry point from its egui operator bar because muda cannot install a menu
+/// bar on the WSL eframe window. The action vocabulary stays shared with the
+/// macOS menu so runtime behavior cannot drift between platforms.
+pub fn trigger_action(id: &str) {
+    let mut pending_create = false;
+    let mut pending_mount = false;
+    handle_event(id, &mut pending_create, &mut pending_mount);
+
+    if pending_create {
+        if let Some(path) = rfd::FileDialog::new().set_file_name("usb.img").save_file() {
+            let mut s = menu_state::lock();
+            s.usb_virtual_img = Some(path);
+            s.usb_create_req = true;
+        }
+    }
+    if pending_mount {
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            let mut s = menu_state::lock();
+            s.usb_virtual_img = Some(path);
+            s.usb_virtual_mount_req = true;
+        }
+    }
+}
+
 // ── Frame snapshot ────────────────────────────────────────────────────────────
 
 /// Single-acquisition snapshot of every state field touched during one menu
@@ -411,6 +436,9 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
         }
         "restart" => {
             s.restart_requested = true;
+        }
+        "stop" => {
+            s.stop_requested = true;
         }
         "service_mode" => {
             s.service_mode = !s.service_mode;
