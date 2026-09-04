@@ -39,8 +39,7 @@ if (( VIRTUAL_MEDIA )); then
   if command -v mkfs.exfat >/dev/null || command -v mkfs.vfat >/dev/null; then
     :
   else
-    echo "missing virtual-media formatter: install mkfs.exfat or mkfs.vfat" >&2
-    failures=$((failures + 1))
+    echo "warning: Create Image requires mkfs.exfat or mkfs.vfat; mounting an existing image remains available" >&2
   fi
 fi
 

@@ -13,7 +13,8 @@ for a basic launch.
 Building the workspace requires Rust/Cargo 1.85 or newer, matching the
 workspace `rust-version`. Virtual-media image creation additionally requires
 either `mkfs.exfat` or `mkfs.vfat` on `PATH`; `scripts/wsl/run.sh --virtual-media`
-checks for one before starting the application.
+warns if neither is available. Mounting an existing image does not require a
+formatter; Create Image does.
 
 ## First run
 
