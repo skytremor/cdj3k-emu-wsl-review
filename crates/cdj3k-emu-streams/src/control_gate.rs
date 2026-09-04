@@ -97,6 +97,13 @@ impl ControlConnectionGate {
             && self.jog_ready_epoch.load(Ordering::Acquire) == epoch
     }
 
+    /// Whether the current launch has emitted the serial Application Started
+    /// milestone. This is diagnostic only and does not affect readiness.
+    pub fn application_started(&self) -> bool {
+        let epoch = self.epoch.load(Ordering::Acquire);
+        self.application_started_epoch.load(Ordering::Acquire) == epoch
+    }
+
     pub fn is_current(&self, epoch: LaunchEpoch) -> bool {
         self.epoch.load(Ordering::Acquire) == epoch.0
     }

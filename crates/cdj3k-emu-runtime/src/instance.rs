@@ -72,6 +72,7 @@ pub enum InstanceError {
     QmpConnect(QmpError),
     SockDir(std::io::Error),
     EmmcLocked(PathBuf),
+    InstanceLocked(PathBuf),
 }
 
 impl From<QmpError> for InstanceError {
@@ -88,6 +89,7 @@ struct Inner {
     pid: u32,
     /// Held for the lifetime of the instance - blocks any other cdj3k-emu process
     /// from booting against the same eMMC qcow2 (qcow2 is not concurrent-safe).
+    _instance_lock: std::fs::File,
     _emmc_lock: Option<std::fs::File>,
 }
 
@@ -98,6 +100,7 @@ pub struct QemuInstance {
     /// per-instance directory rather than the macOS platform default.
     runtime_dir: PathBuf,
     serial_log_path: PathBuf,
+    qmp_socket_path: Option<PathBuf>,
     inner: Inner,
     running: Arc<AtomicBool>,
 }
@@ -110,6 +113,7 @@ impl QemuInstance {
         kill_stale(config.qmp_port, &config.sock_dir());
 
         std::fs::create_dir_all(config.sock_dir()).map_err(InstanceError::SockDir)?;
+        let instance_lock = acquire_instance_lock(&config.sock_dir())?;
 
         // Exclusive non-blocking flock on the eMMC qcow2 - prevents two cdj3k-emu
         // instances from corrupting the same image. The lock is released when
@@ -218,10 +222,12 @@ impl QemuInstance {
         Ok(Self {
             runtime_dir: config.sock_dir(),
             serial_log_path: config.sock_dir().join("serial.log"),
+            qmp_socket_path: None,
             inner: Inner {
                 thread: Some(thread),
                 qmp,
                 pid,
+                _instance_lock: instance_lock,
                 _emmc_lock: emmc_lock,
             },
             config,
@@ -242,6 +248,8 @@ impl QemuInstance {
         config.qmp_socket = Some(config.guest.run_dir.join(format!("qmp-{launch_id}.sock")));
         let g = &config.guest;
         std::fs::create_dir_all(&g.run_dir).map_err(InstanceError::SockDir)?;
+        let instance_lock = acquire_instance_lock(&g.run_dir)?;
+        remove_stale_qmp_sockets(&g.run_dir);
         prefill_sparse(&g.main_shm_path(), MAIN_SHM_PREFILL).map_err(InstanceError::SockDir)?;
         prefill_sparse(&g.jog_shm_path(), JOG_SHM_BYTES).map_err(InstanceError::SockDir)?;
         if config.virtual_media {
@@ -295,6 +303,42 @@ impl QemuInstance {
         let pid = child.id();
         QEMU_CHILD_PID.store(pid as i32, Ordering::Relaxed);
         let running = Arc::new(AtomicBool::new(true));
+        let qmp_path = config.qmp_socket.as_ref().expect("Linux QMP socket set");
+        let qmp_deadline = Instant::now() + Duration::from_secs(15);
+        let qmp = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+                    let _ = std::fs::remove_file(qmp_path);
+                    return Err(InstanceError::QmpConnect(QmpError::QemuError(format!(
+                        "QEMU exited before QMP negotiation: {status}"
+                    ))));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+                    let _ = std::fs::remove_file(qmp_path);
+                    return Err(InstanceError::SockDir(error));
+                }
+            }
+            match QmpClient::connect_unix(qmp_path) {
+                Ok(qmp) => break qmp,
+                Err(error) if Instant::now() < qmp_deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = error;
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+                    let _ = std::fs::remove_file(qmp_path);
+                    return Err(InstanceError::QmpConnect(error));
+                }
+            }
+        };
+
         let running_clone = Arc::clone(&running);
         let instance_id = g.instance_id;
         let thread = std::thread::Builder::new()
@@ -309,19 +353,6 @@ impl QemuInstance {
             })
             .map_err(InstanceError::SockDir)?;
 
-        let qmp = match QmpClient::connect_with_retry_unix(
-            config.qmp_socket.as_ref().expect("Linux QMP socket set"),
-            Duration::from_secs(15),
-        ) {
-            Ok(qmp) => qmp,
-            Err(error) => {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-                let _ = thread.join();
-                QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
-                return Err(InstanceError::QmpConnect(error));
-            }
-        };
-
         let mut mac_config = QemuConfig::new(g.kernel.clone(), g.initramfs.clone());
         mac_config.instance_id = g.instance_id;
         mac_config.emmc_img = g.emmc_img.clone();
@@ -332,11 +363,13 @@ impl QemuInstance {
         Ok(Self {
             runtime_dir: g.run_dir.clone(),
             serial_log_path,
+            qmp_socket_path: Some(qmp_path.clone()),
             config: mac_config,
             inner: Inner {
                 thread: Some(thread),
                 qmp,
                 pid,
+                _instance_lock: instance_lock,
                 _emmc_lock: emmc_lock,
             },
             running,
@@ -366,6 +399,9 @@ impl QemuInstance {
             .and_then(|t| t.join().ok())
             .unwrap_or(-1);
         QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+        if let Some(path) = &self.qmp_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
         code
     }
 
@@ -394,7 +430,12 @@ impl QemuInstance {
     #[cfg(target_os = "macos")]
     pub fn restart(&mut self, new_config: QemuConfig) -> Result<(), InstanceError> {
         self.stop();
-        // Release the flock before spawn tries to re-acquire it on a new fd.
+        // Release both flocks before spawn tries to re-acquire them on new fds.
+        // The instance lock is intentionally a plain File (rather than an
+        // Option) because it must be held for the whole instance lifetime.
+        unsafe {
+            libc::flock(self.inner._instance_lock.as_raw_fd(), libc::LOCK_UN);
+        }
         self.inner._emmc_lock = None;
         let new = Self::spawn(new_config)?;
         let new = std::mem::ManuallyDrop::new(new);
@@ -411,6 +452,7 @@ impl QemuInstance {
             self.config = std::ptr::read(&new.config);
             self.runtime_dir = std::ptr::read(&new.runtime_dir);
             self.serial_log_path = std::ptr::read(&new.serial_log_path);
+            self.qmp_socket_path = std::ptr::read(&new.qmp_socket_path);
             self.running = std::ptr::read(&new.running);
         }
         Ok(())
@@ -427,6 +469,9 @@ impl Drop for QemuInstance {
         self.shutdown_sequence();
         self.inner.thread.take().and_then(|t| t.join().ok());
         QEMU_CHILD_PID.store(-1, Ordering::Relaxed);
+        if let Some(path) = &self.qmp_socket_path {
+            let _ = std::fs::remove_file(path);
+        }
         cleanup_qemu_files_for_restart(&self.runtime_dir);
     }
 }
@@ -457,6 +502,36 @@ fn prefill_sparse(path: &Path, len: u64) -> std::io::Result<()> {
         .truncate(true)
         .open(path)?;
     f.set_len(len)
+}
+
+/// Acquire the per-instance lock before touching any launch-owned endpoint.
+/// The lock file itself is persistent and harmless; the advisory flock is
+/// released automatically when the owning QemuInstance is dropped.
+fn acquire_instance_lock(run_dir: &Path) -> Result<std::fs::File, InstanceError> {
+    let path = run_dir.join(".instance.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .map_err(InstanceError::SockDir)?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(InstanceError::InstanceLocked(path));
+    }
+    Ok(file)
+}
+
+/// Remove only stale QMP sockets after the instance lock is held. No other
+/// launcher for this instance can be using these files at this point.
+fn remove_stale_qmp_sockets(run_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("qmp-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Kill any stale QEMU from a previous .app run and remove its socket files.
@@ -533,14 +608,6 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
         "usb.empty.medium",
     ] {
         let _ = std::fs::remove_file(sock_dir.join(name));
-    }
-
-    if let Ok(entries) = std::fs::read_dir(sock_dir) {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("qmp-") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
     }
 
     if !keep_vmnet {

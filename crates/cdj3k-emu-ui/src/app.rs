@@ -198,6 +198,7 @@ pub struct CdjApp {
     jog_dbg_lines: [String; 3],
 
     wizard: FirmwareWizard,
+    virtual_media: bool,
 
     qemu_was_running: bool,
     /// Current rendered alpha of the boot/idle shade in [0, 1]. Linearly ramps
@@ -230,6 +231,7 @@ pub struct CdjAppOptions {
     pub control_gate: Option<Arc<ControlConnectionGate>>,
     pub firmware_resources: Option<std::path::PathBuf>,
     pub qemu_img: Option<std::path::PathBuf>,
+    pub virtual_media: bool,
 }
 
 /// Owns the puffin HTTP server for the life of the process when profiling is
@@ -352,6 +354,7 @@ impl CdjApp {
             jog_dbg_last_omega_sample: 0.0,
             jog_dbg_lines: [String::new(), String::new(), String::new()],
             wizard: FirmwareWizard::new_with_options(options.firmware_resources, options.qemu_img),
+            virtual_media: options.virtual_media,
             qemu_was_running: false,
             shade_alpha: 0.0,
             lcds_blanked: false,
@@ -644,6 +647,7 @@ impl CdjApp {
     fn draw_linux_operator_bar(&self, ctx: &egui::Context) {
         let (
             qemu_running,
+            application_started,
             service_mode,
             audio_enabled,
             alc_enabled,
@@ -654,10 +658,12 @@ impl CdjApp {
             audio_device_uid,
             audio_devices,
             latency,
+            virtual_media,
         ) = {
             let s = menu_state::lock();
             (
                 s.qemu_running,
+                s.application_started,
                 s.service_mode,
                 s.audio_enabled,
                 s.alc_enabled,
@@ -668,6 +674,7 @@ impl CdjApp {
                 s.audio_device_uid.clone(),
                 s.audio_devices.clone(),
                 menu_state::unpack_latency(s.latency_packed),
+                self.virtual_media,
             )
         };
 
@@ -678,6 +685,13 @@ impl CdjApp {
                     ui.menu_button("Emulation", |ui| {
                         if ui.button("Install Firmware…").clicked() {
                             cdj3k_emu_platform::menu::trigger_action("install_firmware");
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(!qemu_running, egui::Button::new("Start Emulation"))
+                            .clicked()
+                        {
+                            cdj3k_emu_platform::menu::trigger_action("start");
                             ui.close_menu();
                         }
                         if ui
@@ -701,11 +715,17 @@ impl CdjApp {
                     });
 
                     ui.menu_button("Storage", |ui| {
-                        if ui.button("Mount Image…").clicked() {
+                        if ui
+                            .add_enabled(virtual_media, egui::Button::new("Mount Image…"))
+                            .clicked()
+                        {
                             cdj3k_emu_platform::menu::trigger_action("mount_virtual_usb");
                             ui.close_menu();
                         }
-                        if ui.button("Create Image…").clicked() {
+                        if ui
+                            .add_enabled(virtual_media, egui::Button::new("Create Image…"))
+                            .clicked()
+                        {
                             cdj3k_emu_platform::menu::trigger_action("create_virtual_usb");
                             ui.close_menu();
                         }
@@ -775,6 +795,11 @@ impl CdjApp {
                     };
                     ui.separator();
                     ui.label(qemu_label);
+                    ui.label(if application_started {
+                        "App: started"
+                    } else {
+                        "App: booting"
+                    });
                     if let Some((total, guest, host)) = latency {
                         ui.label(format!("Latency {total} ms ({guest}+{host})"));
                     }

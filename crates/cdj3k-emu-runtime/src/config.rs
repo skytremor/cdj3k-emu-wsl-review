@@ -32,6 +32,7 @@ impl GuestRuntimeConfig {
 pub struct LinuxQemuConfig {
     pub guest: GuestRuntimeConfig,
     pub qemu: PathBuf,
+    pub qemu_img: PathBuf,
     pub audio: bool,
     pub audio_device: Option<String>,
     pub network: bool,
@@ -193,6 +194,7 @@ mod linux_tests {
                 service_mode: false,
             },
             qemu: "qemu-system-aarch64".into(),
+            qemu_img: "qemu-img".into(),
             audio: false,
             audio_device: None,
             network: true,

@@ -434,6 +434,9 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
         "install_firmware" => {
             s.firmware_wizard_requested = true;
         }
+        "start" => {
+            s.qemu_boot_requested = true;
+        }
         "restart" => {
             s.restart_requested = true;
         }

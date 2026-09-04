@@ -105,6 +105,8 @@ pub struct AppState {
     pub stop_requested: bool,
     /// Set to `true` while QEMU is running; updated by the runtime worker.
     pub qemu_running: bool,
+    /// Diagnostic serial milestone for the current launch.
+    pub application_started: bool,
     /// Fires once to open the firmware install wizard.
     pub firmware_wizard_requested: bool,
     /// Fires once after provisioning completes to (re)start QEMU.
@@ -208,6 +210,7 @@ impl AppState {
             debug_screen_popped: false,
             stop_requested: false,
             qemu_running: false,
+            application_started: false,
             firmware_wizard_requested: false,
             qemu_boot_requested: false,
             restart_requested: false,

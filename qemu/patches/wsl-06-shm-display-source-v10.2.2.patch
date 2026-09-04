@@ -74,6 +74,12 @@ index 0000000..c3b7e60
 +        error_report("shm-display: unsupported or out-of-bounds surface update");
 +        return;
 +    }
++    /* Publish an odd generation before touching the shared frame, then an
++     * even generation after the pixels and dirty rectangle are complete.
++     * The host reader accepts only an unchanged even generation. */
++    uint32_t generation = __atomic_load_n(&s->hdr->generation, __ATOMIC_RELAXED);
++    generation += generation & 1u;
++    __atomic_store_n(&s->hdr->generation, generation + 1u, __ATOMIC_RELEASE);
 +    uint8_t *src = surface_data(s->surface) + (size_t)y * src_stride + (size_t)x * bpp;
 +    uint8_t *dst = (uint8_t *)s->hdr + SHM_PIXELS_OFFSET + (size_t)y * s->hdr->stride + (size_t)x * bpp;
 +    for (int row = 0; row < h; row++, src += src_stride, dst += s->hdr->stride) {
@@ -85,7 +91,8 @@ index 0000000..c3b7e60
 +        }
 +    }
 +    s->hdr->dirty_x = x; s->hdr->dirty_y = y; s->hdr->dirty_w = w; s->hdr->dirty_h = h;
-+    __atomic_fetch_add(&s->hdr->generation, 1u, __ATOMIC_RELEASE);
++    /* The payload was written above while the generation was odd. */
++    __atomic_store_n(&s->hdr->generation, generation + 2u, __ATOMIC_RELEASE);
 +}
 +static void shm_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
 +{

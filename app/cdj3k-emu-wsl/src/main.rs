@@ -111,6 +111,8 @@ mod linux {
             let mut state = cdj3k_emu_platform::menu_state::lock();
             state.audio_enabled = settings.audio_enabled;
             state.audio_device_uid = settings.audio_device_uid.clone();
+            state.alc_enabled = settings.alc_enabled;
+            state.haptic_enabled = settings.haptic_enabled;
             if let Some(path) = settings
                 .usb_virtual_path
                 .as_ref()
@@ -122,6 +124,10 @@ mod linux {
         let qemu = args
             .qemu
             .unwrap_or_else(|| PathBuf::from("qemu-system-aarch64"));
+        let qemu_img = args
+            .qemu_img
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("qemu-img"));
         let run_dir = socket_dir.clone();
         let guest = cdj3k_emu_runtime::GuestRuntimeConfig {
             instance_id: instance,
@@ -137,6 +143,7 @@ mod linux {
         let config = cdj3k_emu_runtime::LinuxQemuConfig {
             guest,
             qemu,
+            qemu_img: qemu_img.clone(),
             audio: (args.audio || settings.audio_enabled) && !args.no_audio,
             audio_device: args.audio_device.or(settings.audio_device_uid),
             network: !args.no_network,
@@ -171,7 +178,8 @@ mod linux {
                     cdj3k_emu_ui::app::CdjAppOptions {
                         control_gate: Some(Arc::clone(&control_gate)),
                         firmware_resources: args.resources.clone(),
-                        qemu_img: args.qemu_img.clone(),
+                        qemu_img: Some(qemu_img),
+                        virtual_media: config.virtual_media,
                     },
                 );
                 crate::runtime::spawn(config, start_qemu, Arc::clone(&control_gate));

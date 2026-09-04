@@ -3,7 +3,7 @@
 //! Shm file layout (written by qemu/patch/shm-display.c):
 //!
 //!   [0]   u32  magic       0x514D5348  ("QMS\x00")
-//!   [4]   u32  generation  incremented with RELEASE after every dirty blit
+//!   [4]   u32  generation  odd while writing, even after every dirty blit
 //!   [8]   u32  width
 //!   [12]  u32  height
 //!   [16]  u32  stride      bytes per row
@@ -14,10 +14,10 @@
 //!   [36]  u32  dirty_h
 //!   [64]  u8[] pixels      stride × height bytes
 //!
-//! The reader polls `generation` with Acquire semantics; when it changes,
-//! dirty_x/y/w/h and pixel data are copied into an owned buffer and the
-//! generation is checked again before publication. This prevents QEMU from
-//! modifying the live mmap while the UI/OpenGL thread consumes a frame.
+//! The reader polls `generation` with Acquire semantics; it accepts only an
+//! even generation that remains unchanged while dirty_x/y/w/h and pixel data
+//! are copied into an owned buffer. This prevents QEMU from modifying the live
+//! mmap while the UI/OpenGL thread consumes a frame.
 //!
 //! Pixel format: format=1 (RGBA8888, R,G,B,A byte order).
 //! shm_gfx_update converts XRGB8888→RGBA8888 on the QEMU side so the host
@@ -209,10 +209,10 @@ fn poll_loop(
             return;
         }
 
-        // Acquire load of generation - pairs with QEMU's RELEASE add.
+        // Acquire load of generation - pairs with QEMU's RELEASE stores.
         let gen = read_u32_acquire(mmap, 4);
 
-        if gen == last_gen {
+        if gen == last_gen || !generation_is_stable(gen, gen) {
             continue;
         }
         puffin::profile_scope!("main_lcd_gen_bump");
@@ -226,10 +226,6 @@ fn poll_loop(
 
         if !valid_frame(width, height, stride, format, mmap.len()) {
             continue;
-        }
-
-        if let Some(control_gate) = control_gate {
-            control_gate.observe_main(gen, width as u32, height as u32);
         }
 
         // Reset accumulator on surface dimension change.
@@ -288,6 +284,9 @@ fn poll_loop(
                             stride: (uw * 4) as u32,
                             pixels,
                         });
+                        if let Some(control_gate) = control_gate {
+                            control_gate.observe_main(gen, width as u32, height as u32);
+                        }
                         frames_seen.fetch_add(1, Ordering::Relaxed);
                         first_frame = false;
                         gate.request();
@@ -352,10 +351,14 @@ fn copy_stable_rect(
         pixels[target_offset..target_offset + row_bytes]
             .copy_from_slice(&mmap[source_offset..source_end]);
     }
-    if read_u32_acquire(mmap, 4) != generation {
+    if !generation_is_stable(generation, read_u32_acquire(mmap, 4)) {
         return None;
     }
     Some(pixels)
+}
+
+fn generation_is_stable(expected: u32, observed: u32) -> bool {
+    expected != 0 && expected & 1 == 0 && observed == expected
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +401,10 @@ fn read_u32_acquire(mmap: &Mmap, offset: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_stable_rect, valid_frame, SHM_FORMAT_RGBA8888, SHM_MAGIC, SHM_PIXELS_OFFSET};
+    use super::{
+        copy_stable_rect, generation_is_stable, valid_frame, SHM_FORMAT_RGBA8888, SHM_MAGIC,
+        SHM_PIXELS_OFFSET,
+    };
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -423,6 +429,13 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_unchanged_even_generations() {
+        assert!(!generation_is_stable(1, 1));
+        assert!(!generation_is_stable(2, 4));
+        assert!(generation_is_stable(2, 2));
+    }
+
+    #[test]
     fn copies_owned_rect_only_after_stable_generation() {
         let path = std::env::temp_dir().join(format!(
             "cdj3k-main-stream-test-{}-{}",
@@ -432,7 +445,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let size = SHM_PIXELS_OFFSET + 32 + 16;
+        let size = SHM_PIXELS_OFFSET + 32;
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -443,21 +456,24 @@ mod tests {
         file.set_len(size as u64).unwrap();
         let mut header = [0u8; SHM_PIXELS_OFFSET];
         header[0..4].copy_from_slice(&SHM_MAGIC.to_le_bytes());
-        header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        header[4..8].copy_from_slice(&2u32.to_le_bytes());
         header[8..12].copy_from_slice(&4u32.to_le_bytes());
         header[12..16].copy_from_slice(&2u32.to_le_bytes());
         header[16..20].copy_from_slice(&16u32.to_le_bytes());
         header[20..24].copy_from_slice(&SHM_FORMAT_RGBA8888.to_le_bytes());
+        header[24..28].copy_from_slice(&0u32.to_le_bytes());
+        header[28..32].copy_from_slice(&0u32.to_le_bytes());
+        header[32..36].copy_from_slice(&4u32.to_le_bytes());
+        header[36..40].copy_from_slice(&2u32.to_le_bytes());
         file.write_all(&header).unwrap();
-        file.write_all(&(0u32).to_le_bytes()).unwrap();
-        file.write_all(&(0u32).to_le_bytes()).unwrap();
-        file.write_all(&(4u32).to_le_bytes()).unwrap();
-        file.write_all(&(2u32).to_le_bytes()).unwrap();
-        file.write_all(&[0x11; 32]).unwrap();
+        file.write_all(&(1u8..=32).collect::<Vec<_>>()).unwrap();
         file.sync_all().unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
-        let pixels = copy_stable_rect(&mmap, 1, 0, 0, 4, 2, 16, 4, 2).unwrap();
-        assert_eq!(pixels.len(), 32);
+        let pixels = copy_stable_rect(&mmap, 2, 1, 0, 2, 2, 16, 4, 2).unwrap();
+        assert_eq!(
+            pixels,
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23, 24, 25, 26, 27, 28]
+        );
         std::fs::remove_file(path).unwrap();
     }
 }
