@@ -382,3 +382,115 @@ impl QemuConfig {
         args
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::QemuConfig;
+    use std::path::PathBuf;
+
+    fn config() -> QemuConfig {
+        QemuConfig::new(
+            PathBuf::from("/build/Image"),
+            PathBuf::from("/build/initramfs"),
+        )
+    }
+
+    fn has_arg(args: &[String], value: &str) -> bool {
+        args.iter().any(|arg| arg == value)
+    }
+
+    fn arg_starting_with<'a>(args: &'a [String], prefix: &str) -> &'a str {
+        args.iter()
+            .find(|arg| arg.starts_with(prefix))
+            .map(String::as_str)
+            .unwrap_or_else(|| panic!("missing argument starting with {prefix:?}"))
+    }
+
+    #[test]
+    fn defaults_preserve_the_macos_hvf_command_shape() {
+        let args = config().build_argv();
+
+        assert_eq!(args[0], "cdj3k-emu-qemu");
+        assert!(has_arg(&args, "-accel"));
+        assert!(has_arg(&args, "hvf"));
+        assert!(has_arg(&args, "-cpu"));
+        assert!(has_arg(&args, "host"));
+        assert!(has_arg(&args, "-smp"));
+        assert!(has_arg(&args, "4"));
+        assert!(has_arg(&args, "-kernel"));
+        assert!(has_arg(&args, "/build/Image"));
+        assert!(has_arg(&args, "-initrd"));
+        assert!(has_arg(&args, "/build/initramfs"));
+        assert!(has_arg(&args, "-display"));
+        assert!(arg_starting_with(&args, "shm,path=").ends_with("/main.shm"));
+        assert!(has_arg(
+            &args,
+            "virtio-gpu-device,id=virtio-gpu0,xres=1280,yres=720,max_outputs=1"
+        ));
+        assert!(has_arg(
+            &args,
+            "virtio-net-device,netdev=net0,mrg_rxbuf=off"
+        ));
+        assert!(!has_arg(&args, "-audiodev"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("file=/") && arg.contains("emmc")));
+    }
+
+    #[test]
+    fn tcg_mode_uses_the_explicit_portable_cpu_and_gic() {
+        let mut cfg = config();
+        cfg.hvf = false;
+
+        let args = cfg.build_argv();
+
+        assert!(has_arg(&args, "-cpu"));
+        assert!(has_arg(&args, "cortex-a72"));
+        assert!(!has_arg(&args, "-accel"));
+        assert!(arg_starting_with(&args, "virt,gic-version=3,").ends_with("kernel-irqchip=off"));
+    }
+
+    #[test]
+    fn optional_devices_are_independent_and_use_explicit_paths() {
+        let mut cfg = config();
+        cfg.hvf = false;
+        cfg.audio = true;
+        cfg.audio_device_uid = Some("Built-in Output,uid".into());
+        cfg.service_mode = true;
+        cfg.emmc_img = Some(PathBuf::from("/state/emmc.qcow2"));
+        cfg.instance_id = 2;
+
+        let args = cfg.build_argv();
+        let append = arg_starting_with(&args, "root=/dev/ram0");
+
+        assert!(append.contains("subucom_testmode"));
+        assert!(append.contains("snd-dummy.enable=0"));
+        assert!(has_arg(&args, "-audiodev"));
+        assert!(
+            arg_starting_with(&args, "coreaudio,").contains("out.device-uid=Built-in Output,uid")
+        );
+        assert!(has_arg(
+            &args,
+            "virtio-sound-device,audiodev=audio0,streams=1"
+        ));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("file=/state/emmc.qcow2")));
+        assert!(args.iter().any(|arg| arg.contains("instance-2")));
+        assert!(arg_starting_with(&args, "user,id=net0,").contains("hostfwd=tcp::2224-:22"));
+    }
+
+    #[test]
+    fn serial_logging_is_opt_in() {
+        let mut cfg = config();
+        let quiet = cfg.build_argv();
+        assert!(has_arg(&quiet, "null"));
+        assert!(has_arg(&quiet, "none"));
+
+        cfg.serial_log = true;
+        let logged = cfg.build_argv();
+        assert!(logged
+            .iter()
+            .any(|arg| arg.starts_with("file:") && arg.ends_with("/serial.log")));
+    }
+}

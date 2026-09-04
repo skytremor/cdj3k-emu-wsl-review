@@ -231,10 +231,7 @@ fn launch_elevated(bin: &str, iface: Option<&str>, socket_path: &Path) -> io::Re
     // for the isolated network).
     let bin_q = sh_quote(bin);
     let mode_args = match iface {
-        Some(name) => format!(
-            "--vmnet-mode bridged --vmnet-interface {}",
-            sh_quote(name)
-        ),
+        Some(name) => format!("--vmnet-mode bridged --vmnet-interface {}", sh_quote(name)),
         None => "--vmnet-mode host".to_string(),
     };
     let sock_q = sh_quote(&socket_path.to_string_lossy());
