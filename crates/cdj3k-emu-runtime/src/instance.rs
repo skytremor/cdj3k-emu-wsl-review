@@ -235,6 +235,11 @@ impl QemuInstance {
     #[cfg(target_os = "linux")]
     pub fn spawn_linux(config: LinuxQemuConfig) -> Result<Self, InstanceError> {
         let mut config = config;
+        let launch_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        config.qmp_socket = Some(config.guest.run_dir.join(format!("qmp-{launch_id}.sock")));
         let g = &config.guest;
         std::fs::create_dir_all(&g.run_dir).map_err(InstanceError::SockDir)?;
         prefill_sparse(&g.main_shm_path(), MAIN_SHM_PREFILL).map_err(InstanceError::SockDir)?;
@@ -304,7 +309,10 @@ impl QemuInstance {
             })
             .map_err(InstanceError::SockDir)?;
 
-        let qmp = match QmpClient::connect_with_retry(g.qmp_port, Duration::from_secs(15)) {
+        let qmp = match QmpClient::connect_with_retry_unix(
+            config.qmp_socket.as_ref().expect("Linux QMP socket set"),
+            Duration::from_secs(15),
+        ) {
             Ok(qmp) => qmp,
             Err(error) => {
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
@@ -365,7 +373,7 @@ impl QemuInstance {
     /// SIGKILL, but leave thread joining + global PID reset to the caller.
     /// Shared by `stop()` and `Drop`.
     fn shutdown_sequence(&mut self) {
-        if self.inner.thread.is_none() {
+        if self.inner.thread.is_none() || !self.running.load(Ordering::Acquire) {
             return;
         }
         menu_state::lock().power_off_stimuli_requested = true;
@@ -525,6 +533,14 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
         "usb.empty.medium",
     ] {
         let _ = std::fs::remove_file(sock_dir.join(name));
+    }
+
+    if let Ok(entries) = std::fs::read_dir(sock_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("qmp-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     if !keep_vmnet {

@@ -20,18 +20,28 @@ fn run(mut config: LinuxQemuConfig, start: bool, control_gate: Arc<ControlConnec
     let mut instance = start_instance(&config, start, Arc::clone(&control_gate));
 
     while !APP_SHUTDOWN.load(Ordering::Relaxed) {
-        let (audio_changed, audio_enabled, audio_device, media_mount, media_eject, media_path) = {
+        let (
+            audio_changed,
+            audio_enabled,
+            audio_device,
+            service_mode,
+            media_mount,
+            media_eject,
+            media_path,
+        ) = {
             let mut state = menu_state::lock();
             (
                 std::mem::take(&mut state.audio_toggle_requested)
                     || std::mem::take(&mut state.audio_device_toggle_requested),
                 state.audio_enabled,
                 state.audio_device_uid.clone(),
+                state.service_mode,
                 std::mem::take(&mut state.usb_virtual_mount_req),
                 std::mem::take(&mut state.usb_eject_req),
                 state.usb_virtual_img.clone(),
             )
         };
+        config.guest.service_mode = service_mode;
 
         if audio_changed {
             config.audio = audio_enabled;
@@ -41,6 +51,16 @@ fn run(mut config: LinuxQemuConfig, start: bool, control_gate: Arc<ControlConnec
                 old.stop();
             }
             instance = start_instance(&config, true, Arc::clone(&control_gate));
+        }
+
+        if instance
+            .as_ref()
+            .is_some_and(|current| !current.is_running())
+        {
+            control_gate.invalidate();
+            if let Some(mut dead) = instance.take() {
+                let _ = dead.stop();
+            }
         }
 
         if let Some(ref mut current) = instance {

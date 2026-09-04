@@ -40,6 +40,9 @@ pub struct LinuxQemuConfig {
     /// path when this is `None`; callers may provide one for deterministic
     /// tests or operator tooling.
     pub serial_log: Option<PathBuf>,
+    /// Launch-unique QMP socket. Linux fills this immediately before spawn;
+    /// `None` keeps argv characterization tests deterministic.
+    pub qmp_socket: Option<PathBuf>,
 }
 
 impl LinuxQemuConfig {
@@ -69,7 +72,13 @@ impl LinuxQemuConfig {
             "-display".into(),
             format!("shm,path={}", g.main_shm_path().display()),
             "-qmp".into(),
-            format!("tcp:127.0.0.1:{},server=on,wait=off", g.qmp_port),
+            format!(
+                "unix:{},server=on,wait=off",
+                self.qmp_socket
+                    .clone()
+                    .unwrap_or_else(|| g.run_dir.join("qmp.sock"))
+                    .display()
+            ),
             "-serial".into(),
             format!("file:{}", serial_log.display()),
             "-monitor".into(),
@@ -189,6 +198,7 @@ mod linux_tests {
             network: true,
             virtual_media: false,
             serial_log: None,
+            qmp_socket: None,
         }
     }
 
@@ -202,6 +212,9 @@ mod linux_tests {
         assert!(args.iter().any(|arg| arg.contains("4038197248B")));
         assert!(args.iter().any(|arg| arg.contains("virtio-net-device")));
         assert!(!args.iter().any(|arg| arg.contains("virtio-sound-device")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("unix:/tmp/cdj3k-instance-2/qmp.sock")));
     }
 
     #[test]

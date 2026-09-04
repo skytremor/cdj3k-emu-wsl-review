@@ -1,12 +1,48 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 pub struct QmpClient {
-    stream: TcpStream,
-    reader: BufReader<TcpStream>,
+    stream: QmpStream,
+    reader: BufReader<QmpStream>,
+}
+
+enum QmpStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl Read for QmpStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for QmpStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(buf),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -34,8 +70,11 @@ impl QmpClient {
         let addr = format!("127.0.0.1:{}", port);
         let stream = TcpStream::connect(&addr)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let reader = BufReader::new(stream.try_clone()?);
-        let mut client = Self { stream, reader };
+        let reader = BufReader::new(QmpStream::Tcp(stream.try_clone()?));
+        let mut client = Self {
+            stream: QmpStream::Tcp(stream),
+            reader,
+        };
 
         // Read the QMP greeting banner.
         client.read_line()?;
@@ -43,6 +82,20 @@ impl QmpClient {
         // Negotiate capabilities.
         client.execute("qmp_capabilities", &serde_json::json!({}))?;
 
+        Ok(client)
+    }
+
+    #[cfg(unix)]
+    pub fn connect_unix(path: &std::path::Path) -> Result<Self, QmpError> {
+        let stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let reader = BufReader::new(QmpStream::Unix(stream.try_clone()?));
+        let mut client = Self {
+            stream: QmpStream::Unix(stream),
+            reader,
+        };
+        client.read_line()?;
+        client.execute("qmp_capabilities", &serde_json::json!({}))?;
         Ok(client)
     }
 
@@ -56,6 +109,23 @@ impl QmpClient {
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => return Err(e),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn connect_with_retry_unix(
+        path: &std::path::Path,
+        timeout: Duration,
+    ) -> Result<Self, QmpError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match Self::connect_unix(path) {
+                Ok(client) => return Ok(client),
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
             }
         }
     }

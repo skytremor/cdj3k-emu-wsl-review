@@ -142,6 +142,7 @@ mod linux {
             network: !args.no_network,
             virtual_media: args.virtual_media,
             serial_log: None,
+            qmp_socket: None,
         };
         let start_qemu = !args.install_firmware
             && config.guest.kernel.exists()
