@@ -78,6 +78,9 @@ firmware qualification. Those are separate follow-up work.
 
 ## Verification status
 
+The current clean-branch results and remaining gates are recorded in
+[WSL review validation](wsl-validation.md).
+
 Source-level validation and host-side WSL acceptance are separate gates. The
 following require the documented host dependencies and have not been asserted
 by this source tree alone:
