@@ -27,7 +27,12 @@ records.
 
 ## Current source checks (2026-09-22)
 
-Environment: Ubuntu 24.04 on x86_64 WSL2, Rust/Cargo 1.97.1.
+Environment: Ubuntu 24.04 on x86_64 WSL2. The locked workspace test used
+Rust/Cargo 1.88.0; preflight also passed with Rust/Cargo 1.97.1. The resource
+build used Docker 28.3.2 and BuildKit 0.23.2 with `linux/arm64` emulation.
+Native arm64 was not required. The first emulated kernel build took about
+80 minutes. The builder needed network access to Docker Hub, kernel.org, and
+ports.ubuntu.com.
 
 | Check | Result |
 | --- | --- |
@@ -35,10 +40,11 @@ Environment: Ubuntu 24.04 on x86_64 WSL2, Rust/Cargo 1.97.1.
 | WSL three-patch series on pinned QEMU `f8ed81651e61d9c2166df6121ce2af0f44f06b3e` | PASS: clean sequential applicability |
 | WSL QEMU v10.2.2 fresh configure, compile, install | PASS with locally cached upstream subprojects at their pinned wrap revisions |
 | Shell patch-selection and resource-staging tests | PASS |
-| `git diff --check`, `cargo metadata --no-deps`, `cargo fmt --all --check` | PASS |
+| `git diff --check`, `cargo metadata --no-deps --locked`, `cargo fmt --all --check` | PASS |
 | Standalone control-readiness tests | PASS: 5/5 |
-| `cargo test --workspace --locked` | BLOCKED: locked `mio 1.2.3` is not cached and crates.io cannot be reached |
-| Guest-resource build and WSL preflight | BLOCKED: Docker Desktop's WSL integration is unavailable; existing ignored resources have the old flat layout |
+| `cargo test --workspace --locked` | PASS: 19/19 unit tests; doc-test suites also passed |
+| Guest-resource build | PASS: pinned Linux v6.6.138, three out-of-tree modules, guest tools, X.Org dummy driver, and glibc shim built from source and staged in the canonical resource tree |
+| WSL preflight | PASS with the fresh canonical resource tree, QEMU 10.2.2 `shm` backend, WSLg, and Cargo newer than 1.85 |
 | Firmware provisioning and three boot attempts | NOT RUN on this candidate |
 | macOS runtime | NOT PERFORMED without a Mac |
 
@@ -50,9 +56,7 @@ QEMU build script did change, so a macOS runtime smoke test remains necessary.
 
 ## Remaining review gate
 
-Restore locked Cargo dependency access and an arm64-capable Buildx builder,
-then complete workspace tests, build canonical guest resources, and run the
-firmware wizard with user-owned inputs outside Git. Freeze the candidate
+Run the firmware wizard with user-owned inputs outside Git. Freeze the candidate
 commit before provisioning and perform three boots without tracked source
 changes. Record X.Org, EP122, main/jog displays, controls, shutdown, relaunch,
 and each attempt's failure signature. At least one complete pass is required

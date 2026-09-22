@@ -107,7 +107,7 @@ RUN wget -q \
 # Alpine arm64v8's plain `gcc` is the musl-libc cross compiler we want for
 # fully-static aarch64 binaries that don't depend on glibc.
 COPY guest/ /tmp/guest/
-RUN make -C /tmp/guest CC=gcc tools
+RUN rm -rf /tmp/guest/out && make -C /tmp/guest CC=gcc tools
 
 # Collect everything except the shim into /out/. The shim is built in the
 # glibc stage below because it has to be LD_PRELOAD-compatible with EP122
@@ -136,7 +136,7 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends gcc libc6-dev make file && \
     rm -rf /var/lib/apt/lists/*
 COPY guest/ /tmp/guest/
-RUN make -C /tmp/guest CC=gcc shim
+RUN rm -rf /tmp/guest/out && make -C /tmp/guest CC=gcc shim
 
 FROM scratch AS artifacts
 COPY --from=builder      /out/                         /

@@ -191,7 +191,17 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
     return 0;
 }
 
-int gettimeofday(struct timeval *tv, void *tz)
+#if defined(__GLIBC__)
+#if !__GLIBC_PREREQ(2, 31)
+#define SHIM_TIMEZONE_ARG struct timezone *
+#else
+#define SHIM_TIMEZONE_ARG void *
+#endif
+#else
+#define SHIM_TIMEZONE_ARG void *
+#endif
+
+int gettimeofday(struct timeval *tv, SHIM_TIMEZONE_ARG tz)
 {
     long r = syscall(SYS_gettimeofday, tv, tz);
     if (r < 0) { errno = (int)-r; return -1; }
@@ -210,3 +220,5 @@ int gettimeofday(struct timeval *tv, void *tz)
     apply_shift_tv(tv);
     return 0;
 }
+
+#undef SHIM_TIMEZONE_ARG

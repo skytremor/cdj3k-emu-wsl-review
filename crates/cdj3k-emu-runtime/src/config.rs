@@ -764,6 +764,7 @@ mod tests {
         cfg.service_mode = true;
         cfg.emmc_img = Some(PathBuf::from("/state/emmc.qcow2"));
         cfg.instance_id = 2;
+        cfg.ssh_port = 2224;
 
         let args = cfg.build_argv();
         let append = arg_starting_with(&args, "root=/dev/ram0");

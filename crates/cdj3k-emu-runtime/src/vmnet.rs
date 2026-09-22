@@ -139,14 +139,21 @@ impl Drop for SocketVmnet {
 
 // ── Security.framework FFI ────────────────────────────────────────────────────
 
+#[cfg(target_os = "macos")]
 type AuthorizationRef = *mut libc::c_void;
+#[cfg(target_os = "macos")]
 type OSStatus = i32;
+#[cfg(target_os = "macos")]
 type AuthorizationFlags = u32;
 
+#[cfg(target_os = "macos")]
 const K_AUTH_FLAG_DEFAULTS: AuthorizationFlags = 0;
+#[cfg(target_os = "macos")]
 const K_AUTH_FLAG_INTERACTION_ALLOWED: AuthorizationFlags = 1 << 0;
+#[cfg(target_os = "macos")]
 const K_AUTH_FLAG_EXTEND_RIGHTS: AuthorizationFlags = 1 << 1;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct AuthorizationItem {
     name: *const libc::c_char,
@@ -155,12 +162,14 @@ struct AuthorizationItem {
     flags: u32,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct AuthorizationItemSet {
     count: u32,
     items: *mut AuthorizationItem,
 }
 
+#[cfg(target_os = "macos")]
 #[link(name = "Security", kind = "framework")]
 extern "C" {
     fn AuthorizationCreate(
@@ -286,6 +295,7 @@ fn socket_accepts(path: &std::path::Path) -> bool {
 /// Run an arbitrary shell command as root via macOS Authorization Services.
 /// Shows the native admin dialog (TouchID / Apple Watch eligible).
 /// Shared by `vmnet` and `tapbridge`.
+#[cfg(target_os = "macos")]
 pub fn run_elevated(sh_cmd: &str) -> io::Result<()> {
     use std::ffi::CString;
     use std::ptr;
@@ -353,6 +363,14 @@ pub fn run_elevated(sh_cmd: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_elevated(_sh_cmd: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "macOS Authorization Services are unavailable on this host",
+    ))
 }
 
 /// Wrap a string in single quotes for /bin/sh, escaping any embedded `'`.

@@ -2,8 +2,12 @@ diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/v
 index ad924a850..34dd2edbd 100644
 --- a/drivers/gpu/drm/virtio/virtgpu_display.c
 +++ b/drivers/gpu/drm/virtio/virtgpu_display.c
-@@ -1,0 +2 @@
+@@ -30,4 +30,5 @@
+ #include <drm/drm_edid.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
 +#include "cdj3k_jog_mode.h"
+ #include <drm/drm_probe_helper.h>
 @@ -164,6 +164,31 @@ static int virtio_gpu_conn_get_modes(struct drm_connector *connector)
  	struct drm_display_mode *mode = NULL;
  	int count, width, height;
