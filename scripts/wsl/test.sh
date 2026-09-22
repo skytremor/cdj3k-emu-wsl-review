@@ -60,6 +60,24 @@ if validate_resource_layout "${old_layout}" 2>"${fixture}/error"; then
 fi
 grep -q 'stale flat WSL resource layout' "${fixture}/error"
 
+# Rootfs patch scripts must use in-place editing syntax accepted by GNU sed
+# on WSL as well as BSD sed on macOS.
+patch_root="${fixture}/patch-root"
+mkdir -p "${patch_root}/home/root/scripts" "${patch_root}/etc"
+cat >"${patch_root}/home/root/scripts/apl_start.sh" <<'EOF'
+SN65REG=$(/sbin/i2cget -f -y 3 0x2c 0xe5)
+/bin/aplay silence.wav
+EOF
+ROOTFS="${patch_root}" bash "${ROOT_DIR}/initramfs-patch/patch-rootfs.d/01-sn65-stub.sh" >/dev/null
+grep -q 'SN65REG="0x00"' "${patch_root}/home/root/scripts/apl_start.sh"
+grep -q 'QEMU: skip aplay' "${patch_root}/home/root/scripts/apl_start.sh"
+test ! -e "${patch_root}/home/root/scripts/apl_start.sh.bak"
+printf '%s\n' 'root:locked:1:2:3:4:5:6:7' >"${patch_root}/etc/shadow"
+ROOTFS="${patch_root}" ENABLE_SSH=1 \
+  bash "${ROOT_DIR}/initramfs-patch/patch-rootfs.d/04-root-password.sh" >/dev/null
+grep -q '^root::' "${patch_root}/etc/shadow"
+test ! -e "${patch_root}/etc/shadow.bak"
+
 # A failed artifact build must leave the previous resource tree intact. A
 # successful build must publish only the fully staged canonical layout.
 fake_root="${fixture}/repo"

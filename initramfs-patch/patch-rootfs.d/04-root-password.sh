@@ -15,7 +15,8 @@ fi
 
 SHADOW="$ROOTFS/etc/shadow"
 if [[ -f "$SHADOW" ]]; then
-    sed -i '' 's/^root:[^:]*:/root::/' "$SHADOW"
+    sed -i.bak 's/^root:[^:]*:/root::/' "$SHADOW"
+    rm -f "$SHADOW.bak"
     echo "  -> root password hash cleared (passwordless SSH enabled)"
 else
     echo "  WARNING: $SHADOW not found"

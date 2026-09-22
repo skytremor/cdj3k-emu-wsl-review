@@ -84,10 +84,14 @@ EOF
     #     prevents PTR lookup on connecting IP which would block without a resolver.
     SSHD_CFG="$ROOTFS/etc/ssh/sshd_config"
     if [[ -f "$SSHD_CFG" ]]; then
-        sed -i '' 's/^UsePrivilegeSeparation.*/UsePrivilegeSeparation no/' "$SSHD_CFG"
-        grep -q '^UseDNS' "$SSHD_CFG" \
-            && sed -i '' 's/^UseDNS.*/UseDNS no/' "$SSHD_CFG" \
-            || echo 'UseDNS no' >> "$SSHD_CFG"
+        sed -i.bak 's/^UsePrivilegeSeparation.*/UsePrivilegeSeparation no/' "$SSHD_CFG"
+        rm -f "$SSHD_CFG.bak"
+        if grep -q '^UseDNS' "$SSHD_CFG"; then
+            sed -i.bak 's/^UseDNS.*/UseDNS no/' "$SSHD_CFG"
+            rm -f "$SSHD_CFG.bak"
+        else
+            echo 'UseDNS no' >> "$SSHD_CFG"
+        fi
         echo "  -> sshd_config: UsePrivilegeSeparation=no UseDNS=no"
     fi
 fi
