@@ -1,7 +1,7 @@
 # WSL review validation
 
-Status: **3/3 firmware boots reproduced; publication remains gated on the
-product-imagery rights decision and anonymous-access check**.
+Status: **3/3 firmware boots reproduced and the technical-review repository is
+publicly accessible**.
 
 ## Revision identity
 
@@ -103,11 +103,17 @@ device even though the firmware probes virtio-mmio block devices in reverse
 order. This predates the final-candidate fixes and was outside the basic boot
 gate; review and test it separately before claiming virtual-media support.
 
-## Remaining sharing gate
+## Publication record
 
-The tracked history and refs were audited for secrets and prohibited generated
-artifacts. Before making the review repository public, obtain a human rights
-decision for the inherited screenshots, GIFs, and product imagery. After that
-decision, make the review URL public and verify it in an unauthenticated
-session. Keep firmware, keys, derived images, raw logs, and local paths out of
-the published record.
+The tracked history and every ref were audited for secrets and prohibited
+generated artifacts. The repository owner approved retaining only the imagery
+inherited from the public upstream repository, including its screenshots, GIFs,
+icons, and application imagery, under the upstream `NOTICE`. All upstream
+license and notice files remain unchanged. This decision does not cover private
+runtime-lab output, and no firmware-derived screenshot or image was added.
+
+The technical-review repository is public at
+<https://github.com/skytremor/cdj3k-emu-wsl-review>. On 2026-09-22 its default
+`feat/linux-wsl` branch was verified through an HTTP request and a Git
+`ls-remote` request with GitHub credentials removed. Firmware, keys, derived
+images, raw logs, and local paths remain outside the published repository.
