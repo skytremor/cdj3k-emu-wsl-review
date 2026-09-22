@@ -78,7 +78,7 @@ $(OUT):
 
 # --- shim ---
 $(EP122_SHIM): $(EP122_SHIM_OBJS)
-	$(CC) $(EP122_SHIM_CFLAGS) -o $@ $^
+	$(CC) $(EP122_SHIM_CFLAGS) -o $@ $^ -lpthread
 	@echo "Built: $@"
 	@command -v file >/dev/null && file $@ || true
 

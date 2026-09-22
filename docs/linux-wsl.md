@@ -31,6 +31,19 @@ scripts/wsl/build-resources.sh
 scripts/wsl/preflight.sh
 ```
 
+The ARM64 resource build can also run independently of the invoking terminal.
+This keeps a long emulated kernel compile alive across agent or shell sessions
+and writes its complete output under the ignored `build/` directory:
+
+```sh
+scripts/wsl/build-resources.sh --background
+# Check once after the build has had time to finish.
+scripts/wsl/build-resources.sh --status
+```
+
+The start command prints the exact log path. A successful status exits 0, a
+failed status exits 1, and a build still in progress exits 3.
+
 The resource builder uses Docker Buildx with a `linux/arm64` builder (native
 arm64 or host emulation). QEMU needs Meson, Ninja, a C toolchain, and the
 dependencies selected by its pinned configure command. The scripts validate

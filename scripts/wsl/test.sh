@@ -123,4 +123,19 @@ test -f "${fake_root}/build/wsl-resources/sentinel"
 PATH="${fake_bin}:${PATH}" bash "${fake_root}/scripts/wsl/build-resources.sh" >/dev/null
 validate_resource_layout "${fake_root}/build/wsl-resources"
 test ! -e "${fake_root}/build/wsl-resources/sentinel"
+
+# Detached builds must survive their launcher, capture a file log, and expose
+# a final status without requiring the caller to hold the build session open.
+PATH="${fake_bin}:${PATH}" \
+  bash "${fake_root}/scripts/wsl/build-resources.sh" --background >/dev/null
+async_status="${fake_root}/build/wsl-resource-build/status"
+for _ in {1..100}; do
+  [[ -f "${async_status}" ]] || { sleep 0.05; continue; }
+  [[ "$(sed -n 's/^state=//p' "${async_status}")" == running ]] || break
+  sleep 0.05
+done
+PATH="${fake_bin}:${PATH}" \
+  bash "${fake_root}/scripts/wsl/build-resources.sh" --status >/dev/null
+grep -qx 'state=succeeded' "${async_status}"
+grep -q 'WSL resources staged' "${fake_root}/build/wsl-resource-build/build.log"
 echo "WSL scripts syntax passed"

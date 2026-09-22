@@ -53,6 +53,19 @@ index ad924a850..34dd2edbd 100644
  	width  = le32_to_cpu(output->info.r.width);
  	height = le32_to_cpu(output->info.r.height);
  
+@@ -233,5 +265,8 @@ static enum drm_connector_status virtio_gpu_conn_detect(
+-	if (output->info.enabled)
+-		return connector_status_connected;
+-	else
+-		return connector_status_disconnected;
++	if (output->index == 1)
++		return connector_status_connected;
++
++	if (output->info.enabled)
++		return connector_status_connected;
++	else
++		return connector_status_disconnected;
+ }
 @@ -265,6 +287,15 @@ static int vgdev_output_init(struct virtio_gpu_device *vgdev, int index)
  		output->info.enabled = cpu_to_le32(true);
  		output->info.r.width = cpu_to_le32(XRES_DEF);

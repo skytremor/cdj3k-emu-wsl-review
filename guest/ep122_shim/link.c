@@ -36,6 +36,14 @@
 
 #include "ep122_shim.h"
 #include <pthread.h>
+
+#if defined(__GLIBC__) && defined(__aarch64__)
+extern int cdj3k_legacy_pthread_create(pthread_t *, const pthread_attr_t *,
+                                      void *(*)(void *), void *);
+__asm__(".symver cdj3k_legacy_pthread_create,pthread_create@GLIBC_2.17");
+#else
+#define cdj3k_legacy_pthread_create pthread_create
+#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -191,7 +199,7 @@ static void ensure_worker_started(void)
     if (!__atomic_compare_exchange_n(&g_worker_started, &expected, 1,
                                      0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return;
-    if (pthread_create(&g_worker, NULL, link_worker_fn, NULL) != 0) {
+    if (cdj3k_legacy_pthread_create(&g_worker, NULL, link_worker_fn, NULL) != 0) {
         __atomic_store_n(&g_worker_started, 0, __ATOMIC_RELEASE);
         if (g_link_debug) {
             fprintf(stderr, "[ep122_link] pthread_create failed; "

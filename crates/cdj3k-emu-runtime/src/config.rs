@@ -56,6 +56,8 @@ impl LinuxQemuConfig {
         let mut args = vec![
             "-machine".into(),
             "virt,gic-version=3".into(),
+            "-global".into(),
+            "virtio-mmio.force-legacy=false".into(),
             "-accel".into(),
             "tcg,thread=multi".into(),
             "-cpu".into(),
@@ -166,7 +168,7 @@ impl LinuxQemuConfig {
 
 fn linux_kernel_command_line(guest: &GuestRuntimeConfig, audio: bool) -> String {
     let mut cmd =
-        "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1".to_string();
+        "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 systemd.journald.forward_to_console=1 virtio_gpu.modeset=1".to_string();
     if guest.service_mode {
         cmd.push_str(" subucom_testmode");
     }
@@ -212,6 +214,8 @@ mod linux_tests {
             [
                 "-machine",
                 "virt,gic-version=3",
+                "-global",
+                "virtio-mmio.force-legacy=false",
                 "-accel",
                 "tcg,thread=multi",
                 "-cpu",
@@ -225,7 +229,7 @@ mod linux_tests {
                 "-initrd",
                 "/tmp/initramfs",
                 "-append",
-                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1",
+                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 systemd.journald.forward_to_console=1 virtio_gpu.modeset=1",
                 "-display",
                 "shm,path=/tmp/cdj3k-instance-2/main.shm",
                 "-qmp",
@@ -290,7 +294,7 @@ mod linux_tests {
         assert!(args.windows(2).any(|pair| pair
             == [
                 "-append",
-                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1 subucom_testmode snd-dummy.enable=0"
+                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 systemd.journald.forward_to_console=1 virtio_gpu.modeset=1 subucom_testmode snd-dummy.enable=0"
             ]));
         assert!(args
             .windows(2)

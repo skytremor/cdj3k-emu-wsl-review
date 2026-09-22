@@ -15,7 +15,26 @@
 
 #include "ep122_shim.h"
 #include <dirent.h>
+#include <pthread.h>
 
+#if defined(__GLIBC__) && defined(__aarch64__)
+extern unsigned long cdj3k_legacy_strtoul(const char *, char **, int);
+__asm__(".symver cdj3k_legacy_strtoul,strtoul@GLIBC_2.17");
+#else
+#define cdj3k_legacy_strtoul strtoul
+#endif
+
+#if defined(__GLIBC__) && defined(__aarch64__)
+extern int cdj3k_jog_legacy_pthread_create(pthread_t *, const pthread_attr_t *,
+                                           void *(*)(void *), void *);
+__asm__(".symver cdj3k_jog_legacy_pthread_create,pthread_create@GLIBC_2.17");
+#else
+#define cdj3k_jog_legacy_pthread_create pthread_create
+#endif
+
+static uint32_t g_jog_publish_lock;
+static uint32_t g_jog_publisher_started;
+static pthread_t g_jog_publisher;
 
 /* Register a jog framebuffer handle so we can later snoop EP122's MAP_DUMB
  * and mmap() calls for it. */
@@ -81,14 +100,14 @@ static void *open_ivshmem_bar(void)
         n = (int)read(fd, buf, sizeof(buf) - 1); close(fd);
         if (n <= 0) continue;
         buf[n] = 0;
-        if (strtoul(buf, NULL, 0) != 0x1af4u) continue;
+        if (cdj3k_legacy_strtoul(buf, NULL, 0) != 0x1af4u) continue;
 
         snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/device", de->d_name);
         fd = open(path, O_RDONLY); if (fd < 0) continue;
         n = (int)read(fd, buf, sizeof(buf) - 1); close(fd);
         if (n <= 0) continue;
         buf[n] = 0;
-        if (strtoul(buf, NULL, 0) != 0x1110u) continue;
+        if (cdj3k_legacy_strtoul(buf, NULL, 0) != 0x1110u) continue;
 
         snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/resource2", de->d_name);
         fd = open(path, O_RDWR | O_SYNC);
@@ -142,12 +161,49 @@ void publish_frame(const void *src_1280)
 {
     void *base = __atomic_load_n(&g_jog_shm_base, __ATOMIC_ACQUIRE);
     if (!base || !g_jog_shm_pixels) return;
+    uint32_t unlocked = 0;
+    if (!__atomic_compare_exchange_n(&g_jog_publish_lock, &unlocked, 1, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+        return;
     volatile uint32_t *seq = (volatile uint32_t *)((uint8_t *)base + JOG_SHM_OFF_SEQ);
     uint32_t s = *seq;
     /* odd → write in progress */
     __atomic_store_n((uint32_t *)seq, s | 1u, __ATOMIC_RELEASE);
     extract_to_shm(src_1280, g_jog_shm_pixels);
     __atomic_store_n((uint32_t *)seq, (s | 1u) + 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_jog_publish_lock, 0, __ATOMIC_RELEASE);
+}
+
+/* EP122 renders into a persistently mmap'd dumb buffer, so pixel writes do not
+ * necessarily produce a DRM ioctl after the initial modeset. Sample the active
+ * buffer at display cadence; ioctl-triggered publishes remain useful for low
+ * latency and are serialized with this worker by g_jog_publish_lock. */
+static void *jog_publish_worker(void *unused)
+{
+    (void)unused;
+    const struct timespec cadence = { .tv_sec = 0, .tv_nsec = 16666666L };
+    for (;;) {
+        void *src = __atomic_load_n(&g_jog_current_dma_ptr, __ATOMIC_ACQUIRE);
+        if (src)
+            publish_frame(src);
+        syscall(SYS_nanosleep, &cadence, NULL);
+    }
+    return NULL;
+}
+
+static void jog_publisher_start_once(void)
+{
+    uint32_t stopped = 0;
+    if (!__atomic_compare_exchange_n(&g_jog_publisher_started, &stopped, 1, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;
+    if (cdj3k_jog_legacy_pthread_create(&g_jog_publisher, NULL,
+                                        jog_publish_worker, NULL) != 0) {
+        __atomic_store_n(&g_jog_publisher_started, 0, __ATOMIC_RELEASE);
+        fprintf(stderr, "[ep122_shim] jog publisher thread failed to start\n");
+        return;
+    }
+    fprintf(stderr, "[ep122_shim] jog publisher active at 60 Hz\n");
 }
 
 /* On the first 1280×240 jog framebuffer: PRIME-export it (logging only - proves
@@ -197,4 +253,6 @@ void export_jog_prime(int drm_fd, uint32_t gem_handle, uint32_t fb_id)
 
     /* On first framebuffer: locate ivshmem BAR + open wake vport. */
     jog_shm_init_once();
+    if (__atomic_load_n(&g_jog_shm_base, __ATOMIC_ACQUIRE))
+        jog_publisher_start_once();
 }
