@@ -207,16 +207,60 @@ mod linux_tests {
     #[test]
     fn linux_defaults_use_tcg_and_two_display_outputs() {
         let args = config().build_argv();
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["-accel", "tcg,thread=multi"]));
-        assert!(args.iter().any(|arg| arg.contains("max_outputs=2")));
-        assert!(args.iter().any(|arg| arg.contains("4038197248B")));
-        assert!(args.iter().any(|arg| arg.contains("virtio-net-device")));
-        assert!(!args.iter().any(|arg| arg.contains("virtio-sound-device")));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("unix:/tmp/cdj3k-instance-2/qmp.sock")));
+        assert_eq!(
+            args,
+            [
+                "-machine",
+                "virt,gic-version=3",
+                "-accel",
+                "tcg,thread=multi",
+                "-cpu",
+                "cortex-a72",
+                "-smp",
+                "4",
+                "-m",
+                "4038197248B",
+                "-kernel",
+                "/tmp/Image",
+                "-initrd",
+                "/tmp/initramfs",
+                "-append",
+                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1",
+                "-display",
+                "shm,path=/tmp/cdj3k-instance-2/main.shm",
+                "-qmp",
+                "unix:/tmp/cdj3k-instance-2/qmp.sock,server=on,wait=off",
+                "-serial",
+                "file:/tmp/cdj3k-instance-2/serial.log",
+                "-monitor",
+                "none",
+                "-no-reboot",
+                "-object",
+                "memory-backend-file,id=jogshm,mem-path=/tmp/cdj3k-instance-2/jog.shm,size=1M,share=on",
+                "-device",
+                "ivshmem-plain,memdev=jogshm,master=on",
+                "-device",
+                "virtio-gpu-device,id=virtio-gpu0,xres=1280,yres=720,max_outputs=2",
+                "-device",
+                "virtio-serial-device,max_ports=8",
+                "-chardev",
+                "socket,id=vserial_ctrl,path=/tmp/cdj3k-instance-2/ctrl.sock,server=on,wait=off",
+                "-device",
+                "virtserialport,chardev=vserial_ctrl,name=cdj3k.ctrl",
+                "-chardev",
+                "socket,id=vserial_cfg,path=/tmp/cdj3k-instance-2/cfg.sock,server=on,wait=off",
+                "-device",
+                "virtserialport,chardev=vserial_cfg,name=cdj3k.cfg",
+                "-drive",
+                "file=/tmp/emmc.qcow2,if=none,id=emmc0,format=qcow2,cache=writeback,file.locking=off",
+                "-device",
+                "virtio-blk-device,drive=emmc0,id=emmc0",
+                "-netdev",
+                "user,id=net0,hostfwd=tcp::2224-:22",
+                "-device",
+                "virtio-net-device,netdev=net0,mac=0a:00:00:00:00:02",
+            ]
+        );
     }
 
     #[test]
@@ -230,6 +274,34 @@ mod linux_tests {
         assert!(!args.iter().any(|arg| arg.contains("-netdev")));
         assert!(args.iter().any(|arg| arg.contains("id=usb0")));
         assert!(args.iter().any(|arg| arg.contains("id=emmc0")));
+    }
+
+    #[test]
+    fn explicit_launch_paths_and_service_mode_are_forwarded() {
+        let mut config = config();
+        config.guest.service_mode = true;
+        config.guest.emmc_img = None;
+        config.serial_log = Some("/tmp/launch-42.log".into());
+        config.qmp_socket = Some("/tmp/launch-42.sock".into());
+        config.audio = true;
+        config.audio_device = Some("sink-1".into());
+        let args = config.build_argv();
+
+        assert!(args.windows(2).any(|pair| pair
+            == [
+                "-append",
+                "root=/dev/ram0 rdinit=/init loglevel=7 nowatchdog rng_core.default_quality=1024 console=ttyAMA0,115200 virtio_gpu.modeset=1 subucom_testmode snd-dummy.enable=0"
+            ]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-qmp", "unix:/tmp/launch-42.sock,server=on,wait=off"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-serial", "file:/tmp/launch-42.log"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-audiodev", "pa,id=audio0,out.name=sink-1"]));
+        assert!(!args.iter().any(|arg| arg.contains("id=emmc0")));
     }
 }
 

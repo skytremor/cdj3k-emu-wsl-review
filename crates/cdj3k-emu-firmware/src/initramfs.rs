@@ -278,6 +278,85 @@ fn validate_patch_resources(resources_dir: &Path) -> Result<(), PatchError> {
     Ok(())
 }
 
+#[cfg(test)]
+mod resource_tests {
+    use super::{validate_patch_resources, PatchError};
+    use std::path::{Path, PathBuf};
+
+    struct ResourceDir(PathBuf);
+
+    impl ResourceDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "cdj3k-resources-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn add(&self, relative: &str) {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+    }
+
+    impl Drop for ResourceDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn canonical_resource_tree_passes_and_legacy_flat_tree_fails() {
+        let resources = ResourceDir::new();
+        for name in [
+            "subucom_virt.ko",
+            "virtio_snd.ko",
+            "udev_usb1.ko",
+            "ep122_shim.so",
+            "subucom_forwarder",
+            "subucom_live",
+            "cfgd",
+            "patch-rootfs.sh",
+            "dummy_drv.so",
+        ] {
+            resources.add(name);
+        }
+        assert!(matches!(
+            validate_patch_resources(resources.path()),
+            Err(PatchError::MissingResource(_))
+        ));
+
+        for name in ["subucom_virt.ko", "virtio_snd.ko", "udev_usb1.ko"] {
+            resources.add(&format!("modules/{name}"));
+            resources.add(&format!("patch/vanilla-modules/{name}"));
+        }
+        for name in ["ep122_shim.so", "subucom_forwarder", "subucom_live", "cfgd"] {
+            resources.add(&format!("tools/{name}"));
+        }
+        for name in ["patch-rootfs.sh", "dummy_drv.so"] {
+            resources.add(&format!("patch/{name}"));
+        }
+        assert!(matches!(
+            validate_patch_resources(resources.path()),
+            Err(PatchError::MissingResource(path)) if path.ends_with("patch/patch-rootfs.d")
+        ));
+
+        std::fs::create_dir(resources.path().join("patch/patch-rootfs.d")).unwrap();
+        validate_patch_resources(resources.path()).unwrap();
+    }
+}
+
 // ── cpio helpers ──────────────────────────────────────────────────────────────
 
 fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path) -> Result<(), PatchError> {

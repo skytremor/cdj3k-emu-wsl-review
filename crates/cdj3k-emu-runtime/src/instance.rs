@@ -619,3 +619,109 @@ fn cleanup_qemu_files_inner(sock_dir: &Path, keep_vmnet: bool) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        acquire_instance_lock, cleanup_qemu_files, cleanup_qemu_files_for_restart,
+        remove_stale_qmp_sockets, InstanceError,
+    };
+    use std::path::{Path, PathBuf};
+
+    struct TestRunDir(PathBuf);
+
+    impl TestRunDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "cdj3k-instance-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestRunDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn instance_lock_blocks_parallel_launch_and_allows_restart_after_release() {
+        let run_dir = TestRunDir::new();
+        let first = acquire_instance_lock(run_dir.path()).unwrap();
+        assert!(matches!(
+            acquire_instance_lock(run_dir.path()),
+            Err(InstanceError::InstanceLocked(_))
+        ));
+        drop(first);
+        let second = acquire_instance_lock(run_dir.path()).unwrap();
+        assert!(run_dir.path().join(".instance.lock").is_file());
+        drop(second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_linux_qmp_socket_is_removed_without_erasing_diagnostics() {
+        use std::os::unix::net::UnixListener;
+
+        let run_dir = TestRunDir::new();
+        let stale = run_dir.path().join("qmp-previous.sock");
+        let _listener = UnixListener::bind(&stale).unwrap();
+        std::fs::write(run_dir.path().join("serial-previous.log"), b"diagnostic").unwrap();
+
+        let lock = acquire_instance_lock(run_dir.path()).unwrap();
+        remove_stale_qmp_sockets(run_dir.path());
+        assert!(!stale.exists());
+        assert_eq!(
+            std::fs::read(run_dir.path().join("serial-previous.log")).unwrap(),
+            b"diagnostic"
+        );
+        drop(lock);
+    }
+
+    #[test]
+    fn restart_cleanup_preserves_operator_files_and_vmnet_socket() {
+        let run_dir = TestRunDir::new();
+        for name in [
+            "main.shm",
+            "jog.shm",
+            "ctrl.sock",
+            "cfg.sock",
+            "usb.empty.medium",
+            "vmnet-1.sock",
+            "serial-previous.log",
+        ] {
+            std::fs::write(run_dir.path().join(name), b"data").unwrap();
+        }
+
+        cleanup_qemu_files_for_restart(run_dir.path());
+        for name in [
+            "main.shm",
+            "jog.shm",
+            "ctrl.sock",
+            "cfg.sock",
+            "usb.empty.medium",
+        ] {
+            assert!(
+                !run_dir.path().join(name).exists(),
+                "{name} survived restart cleanup"
+            );
+        }
+        assert!(run_dir.path().join("vmnet-1.sock").exists());
+        assert!(run_dir.path().join("serial-previous.log").exists());
+
+        cleanup_qemu_files(run_dir.path());
+        assert!(!run_dir.path().join("vmnet-1.sock").exists());
+        assert!(run_dir.path().join("serial-previous.log").exists());
+    }
+}

@@ -11,7 +11,11 @@ SHM transports: `main.shm` for the 1280×720 display and `jog.shm` for the
 for a basic launch.
 
 Building the workspace requires Rust/Cargo 1.85 or newer, matching the
-workspace `rust-version`. Virtual-media image creation additionally requires
+workspace `rust-version`. Check the selected tools with `cargo --version` and
+`rustc --version` before building. If a system Cargo shadows an installed
+rustup toolchain, select the latter first, for example with
+`export PATH="$HOME/.cargo/bin:$PATH"`. The WSL preflight fails early if either
+selected tool is older than 1.85. Virtual-media image creation additionally requires
 either `mkfs.exfat` or `mkfs.vfat` on `PATH`; `scripts/wsl/run.sh --virtual-media`
 warns if neither is available. Mounting an existing image does not require a
 formatter; Create Image does.
@@ -26,6 +30,12 @@ scripts/wsl/build-resources.sh
 scripts/wsl/preflight.sh
 ```
 
+The resource builder uses Docker Buildx with a `linux/arm64` builder (native
+arm64 or host emulation). QEMU needs Meson, Ninja, a C toolchain, and the
+dependencies selected by its pinned configure command. The scripts validate
+these requirements during a clean build; cached outputs are not evidence of
+a successful build from the current source.
+
 The resource builder produces one canonical layout:
 
 ```text
@@ -33,7 +43,7 @@ build/wsl-resources/
 ├── Image
 ├── modules/{subucom_virt,virtio_snd,udev_usb1}.ko
 ├── tools/{ep122_shim.so,subucom_forwarder,subucom_live,cfgd}
-└── patch/{patch-rootfs.sh,dummy_drv.so,vanilla-modules/*.ko}
+└── patch/{patch-rootfs.sh,patch-rootfs.d/,dummy_drv.so,vanilla-modules/*.ko}
 ```
 
 The layout is non-proprietary. Firmware updates, keys, eMMC images, and
@@ -43,12 +53,13 @@ The original R&D archive recorded an internal source snapshot as
 `7c3db1e…`; that identifier is not present in upstream QEMU GitLab. The clean
 workflow therefore pins the verified upstream `v10.2.2` commit
 `f8ed81651e61d9c2166df6121ce2af0f44f06b3e` and applies the three
-repository-owned SHM-display patches locally.
+repository-owned patches in `qemu/patches/wsl/` locally. The original QEMU
+build uses its explicit top-level patch manifest and never reads that directory.
 
 Then launch with `scripts/wsl/run.sh`. If the instance has no `Image`, patched
 initramfs, or eMMC image, the application opens **Install Firmware**. Select
-the local `.UPD` and key; generated files remain in the normal per-instance
-XDG data directory. The key is read for provisioning and is not copied into
+the local `.UPD` and the path to a user-owned keyfile; generated files remain
+in the normal per-instance XDG data directory. The key is read for provisioning and is not copied into
 the resource or runtime directories.
 
 Useful options include `--instance`, `--kernel`, `--initramfs`, `--qemu`,
@@ -81,6 +92,5 @@ Firmware-dependent verification remains user-owned:
 - genuine EP122 boot, main display, jog display, controls, and restart
 - live guest audio, NAT, and virtual media
 
-No authorized local CDJ-3000 `.UPD` file or decryption key is included in the
-repository or supplied by the clean-port validation. Proprietary firmware and
-key material must remain user-owned and outside the repository.
+No CDJ-3000 `.UPD` file or decryption key is included in the repository.
+Proprietary firmware and key material must remain user-owned and outside it.

@@ -185,7 +185,13 @@ fn stream_loop(
     // frame. The cleanup hook zeros the magic before unlink, giving us a
     // reliable in-band signal to drop and re-open.
     loop {
+        let launch_epoch = control_gate.as_ref().map(|gate| gate.current_epoch());
         let shm = open_shm(shm_path);
+        if control_gate.as_ref().map(|gate| gate.current_epoch()) != launch_epoch {
+            // The launch changed while open_shm was waiting. Remap with the
+            // new epoch instead of attributing this mapping to the old one.
+            continue;
+        }
         eprintln!("[jog_stream] shm mapped: {shm_path} ({} bytes)", shm.len());
 
         let mut last_seq: u32 = 0;
@@ -268,8 +274,8 @@ fn stream_loop(
             }
             last_seq = seq_now;
             last_change_at = Some(Instant::now());
-            if let Some(control_gate) = control_gate.as_ref() {
-                control_gate.observe_jog(seq_now);
+            if let (Some(control_gate), Some(epoch)) = (control_gate.as_ref(), launch_epoch) {
+                control_gate.observe_jog(epoch, seq_now);
             }
 
             let corners = corner_colors_from_canvas(canvas);

@@ -7,9 +7,27 @@ QEMU_SOURCE="${ROOT_DIR}/build/wsl-qemu-${QEMU_COMMIT:0:12}"
 QEMU_PREFIX="${ROOT_DIR}/build/wsl-qemu-install"
 QEMU_REPO="https://gitlab.com/qemu-project/qemu.git"
 
-shopt -s nullglob
-patches=("${ROOT_DIR}"/qemu/patches/wsl-*.patch)
-(( ${#patches[@]} > 0 )) || { echo "no WSL QEMU patches found" >&2; exit 1; }
+patch_dir="${ROOT_DIR}/qemu/patches/wsl"
+patch_names=(
+  wsl-04-shm-display-qapi-v10.2.2.patch
+  wsl-05-shm-display-meson-v10.2.2.patch
+  wsl-06-shm-display-source-v10.2.2.patch
+)
+patches=()
+for name in "${patch_names[@]}"; do
+  patch="${patch_dir}/${name}"
+  [[ -f "${patch}" ]] || { echo "expected WSL QEMU patch missing: ${patch}" >&2; exit 1; }
+  patches+=("${patch}")
+done
+
+if [[ "${1:-}" == "--list-patches" && $# -eq 1 ]]; then
+  printf '%s\n' "${patches[@]}"
+  exit 0
+fi
+if [[ $# -ne 0 ]]; then
+  echo "Usage: $0 [--list-patches]" >&2
+  exit 2
+fi
 
 mkdir -p "${ROOT_DIR}/build"
 if [[ ! -d "${QEMU_SOURCE}/.git" ]]; then
@@ -59,8 +77,10 @@ if [[ ! -f "${BUILD_DIR}/build.ninja" ]]; then
   )
 fi
 
-meson compile -C "${BUILD_DIR}" qemu-system-aarch64 qemu-img
-meson install -C "${BUILD_DIR}"
+MESON="${BUILD_DIR}/pyvenv/bin/meson"
+[[ -x "${MESON}" ]] || { echo "QEMU configure did not create its Meson environment: ${MESON}" >&2; exit 1; }
+"${MESON}" compile -C "${BUILD_DIR}" qemu-system-aarch64 qemu-img
+"${MESON}" install -C "${BUILD_DIR}"
 QEMU_BIN="${QEMU_PREFIX}/bin/qemu-system-aarch64"
-"${QEMU_BIN}" -display help | grep -E '^ +shm([[:space:]]|$)' >/dev/null
+"${QEMU_BIN}" -display help | grep -E '^[[:space:]]*shm([[:space:]]|$)' >/dev/null
 echo "QEMU v10.2.2 (${QEMU_COMMIT}) installed in ${QEMU_PREFIX}"

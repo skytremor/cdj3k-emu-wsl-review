@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "${ROOT_DIR}/scripts/wsl/resource-layout.sh"
+source "${ROOT_DIR}/scripts/wsl/toolchain.sh"
 
 QEMU="${ROOT_DIR}/build/wsl-qemu-install/bin/qemu-system-aarch64"
 QEMU_IMG="${ROOT_DIR}/build/wsl-qemu-install/bin/qemu-img"
@@ -18,6 +19,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown preflight option: $1" >&2; exit 2 ;;
   esac
 done
+
+require_rust_toolchain || exit 1
 
 failures=0
 check_exec() {

@@ -144,14 +144,21 @@ fn shm_loop(
     let mut wait_logged = false;
     loop {
         // Wait for the shm file to appear and contain a valid header.
-        let mmap = loop {
+        let (mmap, launch_epoch) = loop {
+            let candidate_epoch = control_gate.as_ref().map(|gate| gate.current_epoch());
             match open_shm(shm_path) {
+                Some(m)
+                    if control_gate.as_ref().map(|gate| gate.current_epoch())
+                        != candidate_epoch =>
+                {
+                    drop(m);
+                }
                 Some(m) => {
                     eprintln!("[main_stream] opened {shm_path}");
                     wait_logged = false;
                     connected.store(true, Ordering::Relaxed);
                     gate.request();
-                    break m;
+                    break (m, candidate_epoch);
                 }
                 None => {
                     if !wait_logged {
@@ -163,7 +170,14 @@ fn shm_loop(
             }
         };
 
-        poll_loop(&mmap, &slot, &frames_seen, &gate, control_gate.as_ref());
+        poll_loop(
+            &mmap,
+            &slot,
+            &frames_seen,
+            &gate,
+            control_gate.as_ref(),
+            launch_epoch,
+        );
 
         // QEMU restarted (magic gone).
         eprintln!("[main_stream] disconnected, reconnecting");
@@ -182,6 +196,7 @@ fn poll_loop(
     frames_seen: &Arc<AtomicU32>,
     gate: &crate::RepaintGate,
     control_gate: Option<&Arc<crate::ControlConnectionGate>>,
+    launch_epoch: Option<crate::LaunchEpoch>,
 ) {
     // Treat the already-published generation as the first event. QEMU writes
     // an initial full frame before the host reader can attach; subtracting one
@@ -284,8 +299,8 @@ fn poll_loop(
                             stride: (uw * 4) as u32,
                             pixels,
                         });
-                        if let Some(control_gate) = control_gate {
-                            control_gate.observe_main(gen, width as u32, height as u32);
+                        if let (Some(control_gate), Some(epoch)) = (control_gate, launch_epoch) {
+                            control_gate.observe_main(epoch, gen, width as u32, height as u32);
                         }
                         frames_seen.fetch_add(1, Ordering::Relaxed);
                         first_frame = false;

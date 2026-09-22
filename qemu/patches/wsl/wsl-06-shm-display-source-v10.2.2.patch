@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..c3b7e60
 --- /dev/null
 +++ b/ui/shm-display.c
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,113 @@
 +/* SPDX-License-Identifier: GPL-2.0-or-later */
 +#include "qemu/osdep.h"
 +#include "ui/console.h"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # qemu/build.sh
 #
-# Clone QEMU v10.2.2, apply the shm display patch, and build qemu-system-aarch64.
+# Clone the pinned QEMU snapshot, apply the original patch series, and build
+# qemu-system-aarch64 for macOS.
 #
 # Usage:
 #   cd <repo-root>
@@ -22,6 +23,41 @@ SHIM_DIR="${SCRIPT_DIR}/shim"
 SRC_DIR="${SCRIPT_DIR}/src"
 BUILD_DIR="${SCRIPT_DIR}/build"
 INSTALL_DIR="${SCRIPT_DIR}/install"
+
+# This is the original QEMU series, in application order. Keep it explicit:
+# other host builds may place incompatible variants below patches/.
+PATCH_NAMES=(
+    01-ivshmem-meson.patch
+    02-ivshmem-event-notifier.patch
+    03-ivshmem-kconfig.patch
+    04-shm-display-qapi.patch
+    05-shm-display-meson.patch
+    06-shm-display-source.patch
+    07-coreaudio-bypass.patch
+    08-virtio-snd-bypass.patch
+    09-system-main-qos.patch
+    10-virtio-blk-removable.patch
+    11-console-vc-quiet.patch
+    12-hvf-vcpu-qos.patch
+)
+PATCHES=()
+for name in "${PATCH_NAMES[@]}"; do
+    patch="${PATCHES_DIR}/${name}"
+    if [[ ! -f "${patch}" ]]; then
+        echo "ERROR: expected QEMU patch missing: ${patch}" >&2
+        exit 1
+    fi
+    PATCHES+=("${patch}")
+done
+
+if [[ "${1:-}" == "--list-patches" && $# -eq 1 ]]; then
+    printf '%s\n' "${PATCHES[@]}"
+    exit 0
+fi
+if [[ $# -ne 0 ]]; then
+    echo "Usage: $0 [--list-patches]" >&2
+    exit 2
+fi
 
 # Pinned to a master snapshot that includes the HVF in-kernel GIC support
 # (Mohamed Mediouni's series, merged 2026-05-05). Stable QEMU 11.0.0 was cut
@@ -70,17 +106,12 @@ fi
 # fail loudly here so the user catches it before a half-patched src/ silently
 # produces a binary missing features or behaving oddly.
 
-if ! ls "${PATCHES_DIR}"/*.patch >/dev/null 2>&1; then
-    echo "ERROR: no patches found in ${PATCHES_DIR}"
-    exit 1
-fi
-
 # Check whether any patch is already applied to the current tree (idempotent
 # re-runs after a successful build land here).  We probe with --reverse
 # --check: if reversing applies cleanly, the patch is already in.
 patch_changed=0
 echo "==> Applying QEMU patches from $(basename "${PATCHES_DIR}")/"
-for p in "${PATCHES_DIR}"/*.patch; do
+for p in "${PATCHES[@]}"; do
     name="$(basename "$p")"
     if git -C "${SRC_DIR}" apply --reverse --check "$p" >/dev/null 2>&1; then
         echo "    [skip]   ${name} - already applied"

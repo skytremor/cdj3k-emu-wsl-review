@@ -7,6 +7,7 @@
 //! but is not a prerequisite for independent display readiness.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LaunchEpoch(u64);
@@ -18,6 +19,7 @@ pub struct ControlConnectionGate {
     jog_ready_epoch: AtomicU64,
     last_jog_seq: AtomicU32,
     jog_advances: AtomicU32,
+    jog_epoch_lock: Mutex<()>,
 }
 
 impl ControlConnectionGate {
@@ -29,11 +31,13 @@ impl ControlConnectionGate {
             jog_ready_epoch: AtomicU64::new(0),
             last_jog_seq: AtomicU32::new(0),
             jog_advances: AtomicU32::new(0),
+            jog_epoch_lock: Mutex::new(()),
         }
     }
 
     /// Start a fresh QEMU launch epoch and invalidate all prior readiness.
     pub fn begin_launch(&self) -> LaunchEpoch {
+        let _guard = self.jog_epoch_lock.lock().unwrap();
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.application_started_epoch.store(0, Ordering::Release);
         self.main_ready_epoch.store(0, Ordering::Release);
@@ -50,6 +54,7 @@ impl ControlConnectionGate {
 
     /// Invalidate the active launch and all readiness observed for it.
     pub fn invalidate(&self) {
+        let _guard = self.jog_epoch_lock.lock().unwrap();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.application_started_epoch.store(0, Ordering::Release);
         self.main_ready_epoch.store(0, Ordering::Release);
@@ -70,23 +75,34 @@ impl ControlConnectionGate {
         true
     }
 
-    pub fn observe_main(&self, generation: u32, width: u32, height: u32) {
-        if generation != 0 && width == 1280 && height == 720 {
-            self.main_ready_epoch
-                .store(self.epoch.load(Ordering::Acquire), Ordering::Release);
+    /// Snapshot the launch token when a display reader maps its SHM file.
+    /// The token is carried with observations from that mapping until it is
+    /// disconnected, so a reader on an old inode cannot ready a new launch.
+    pub fn current_epoch(&self) -> LaunchEpoch {
+        LaunchEpoch(self.epoch.load(Ordering::Acquire))
+    }
+
+    pub fn observe_main(&self, epoch: LaunchEpoch, generation: u32, width: u32, height: u32) {
+        if self.is_current(epoch) && generation != 0 && width == 1280 && height == 720 {
+            self.main_ready_epoch.store(epoch.0, Ordering::Release);
         }
     }
 
-    pub fn observe_jog(&self, seq: u32) {
+    pub fn observe_jog(&self, epoch: LaunchEpoch, seq: u32) {
         if seq == 0 || seq & 1 != 0 {
+            return;
+        }
+        // Serialize with begin_launch/invalidate so a stale observation cannot
+        // modify the new launch's jog sequence counters during the transition.
+        let _guard = self.jog_epoch_lock.lock().unwrap();
+        if !self.is_current(epoch) {
             return;
         }
         let previous = self.last_jog_seq.swap(seq, Ordering::AcqRel);
         if previous != seq {
             let advances = self.jog_advances.fetch_add(1, Ordering::AcqRel) + 1;
             if advances >= 2 {
-                self.jog_ready_epoch
-                    .store(self.epoch.load(Ordering::Acquire), Ordering::Release);
+                self.jog_ready_epoch.store(epoch.0, Ordering::Release);
             }
         }
     }
@@ -122,11 +138,11 @@ mod tests {
     #[test]
     fn requires_main_and_two_jog_advances_without_serial_dependency() {
         let gate = ControlConnectionGate::new();
-        gate.begin_launch();
-        gate.observe_main(1, 1280, 720);
-        gate.observe_jog(2);
+        let epoch = gate.begin_launch();
+        gate.observe_main(epoch, 1, 1280, 720);
+        gate.observe_jog(epoch, 2);
         assert!(!gate.is_ready());
-        gate.observe_jog(4);
+        gate.observe_jog(epoch, 4);
         assert!(gate.is_ready());
 
         gate.begin_launch();
@@ -136,11 +152,29 @@ mod tests {
     #[test]
     fn readiness_order_is_independent() {
         let gate = ControlConnectionGate::new();
-        gate.begin_launch();
-        gate.observe_jog(2);
-        gate.observe_jog(4);
+        let epoch = gate.begin_launch();
+        gate.observe_jog(epoch, 2);
+        gate.observe_jog(epoch, 4);
         assert!(!gate.is_ready());
-        gate.observe_main(1, 1280, 720);
+        gate.observe_main(epoch, 1, 1280, 720);
+        assert!(gate.is_ready());
+    }
+
+    #[test]
+    fn invalid_main_and_duplicate_or_unstable_jog_samples_do_not_release_controls() {
+        let gate = ControlConnectionGate::new();
+        let epoch = gate.begin_launch();
+        gate.observe_main(epoch, 0, 1280, 720);
+        gate.observe_main(epoch, 2, 640, 480);
+        gate.observe_jog(epoch, 0);
+        gate.observe_jog(epoch, 1);
+        gate.observe_jog(epoch, 2);
+        gate.observe_jog(epoch, 2);
+        assert!(!gate.is_ready());
+
+        gate.observe_jog(epoch, 4);
+        assert!(!gate.is_ready());
+        gate.observe_main(epoch, 2, 1280, 720);
         assert!(gate.is_ready());
     }
 
@@ -152,5 +186,30 @@ mod tests {
         assert!(!gate.release(first));
         assert!(!gate.is_ready());
         assert!(gate.release(second));
+    }
+
+    #[test]
+    fn old_mapping_observations_cannot_ready_a_new_launch() {
+        let gate = ControlConnectionGate::new();
+        let old_mapping = gate.begin_launch();
+        assert_eq!(gate.current_epoch(), old_mapping);
+        let new_mapping = gate.begin_launch();
+
+        gate.observe_main(old_mapping, 2, 1280, 720);
+        gate.observe_jog(old_mapping, 2);
+        gate.observe_jog(old_mapping, 4);
+        assert!(!gate.is_ready());
+
+        gate.observe_main(new_mapping, 2, 1280, 720);
+        gate.observe_jog(new_mapping, 2);
+        assert!(!gate.is_ready());
+        gate.observe_jog(new_mapping, 4);
+        assert!(gate.is_ready());
+
+        gate.invalidate();
+        gate.observe_main(new_mapping, 4, 1280, 720);
+        gate.observe_jog(new_mapping, 6);
+        gate.observe_jog(new_mapping, 8);
+        assert!(!gate.is_ready());
     }
 }
