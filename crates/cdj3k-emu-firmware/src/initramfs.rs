@@ -371,8 +371,19 @@ fn unpack_cpio_gz(gz_path: &Path, rootfs: &Path) -> Result<(), PatchError> {
         out
     };
 
-    let mut child = Command::new("cpio")
-        .args(["-id", "--quiet"])
+    let is_gnu_cpio = Command::new("cpio")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.stdout.starts_with(b"cpio (GNU cpio)"));
+    let mut command = Command::new("cpio");
+    command.args(["-id", "--quiet"]);
+    if is_gnu_cpio {
+        // An unprivileged Linux process cannot recreate this character device,
+        // and GNU cpio treats that expected omission as a fatal exit status.
+        // The guest mounts devtmpfs over /dev during boot, so do not extract it.
+        command.args(["-f", "dev/console"]);
+    }
+    let mut child = command
         .current_dir(rootfs)
         .stdin(std::process::Stdio::piped())
         .spawn()
