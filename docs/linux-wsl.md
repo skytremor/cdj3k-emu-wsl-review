@@ -103,11 +103,11 @@ by this source tree alone:
 - WSL preflight and WSLg application startup
 - first-run wizard path and per-instance state provisioning
 
-Firmware-dependent verification remains user-owned:
-
-- completion of firmware provisioning
-- genuine EP122 boot, main display, jog display, controls, and restart
-- live guest audio, NAT, and virtual media
+The frozen review source commit has completed three firmware-backed boots on
+WSL2, including the EP122 application, main and jog displays, bidirectional
+control transport, graceful shutdown, in-process restart, and full application
+relaunch. Exact results and limitations are in the validation record. Live
+guest audio, NAT, physical USB, and virtual media remain outside that result.
 
 No CDJ-3000 `.UPD` file or decryption key is included in the repository.
 Proprietary firmware and key material must remain user-owned and outside it.
