@@ -27,6 +27,7 @@ pub enum PatchError {
     Io(io::Error),
     Extract(ExtractError),
     MissingResource(String),
+    InvalidResource(String),
     CommandFailed(String),
 }
 
@@ -36,6 +37,7 @@ impl std::fmt::Display for PatchError {
             Self::Io(e) => write!(f, "I/O: {e}"),
             Self::Extract(e) => write!(f, "extract: {e}"),
             Self::MissingResource(s) => write!(f, "missing bundled resource: {s}"),
+            Self::InvalidResource(s) => write!(f, "invalid bundled resource: {s}"),
             Self::CommandFailed(s) => write!(f, "command failed: {s}"),
         }
     }
@@ -248,7 +250,38 @@ pub fn patch_initramfs(
     Ok(())
 }
 
-fn validate_patch_resources(resources_dir: &Path) -> Result<(), PatchError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceProfile {
+    MergedDispatcher,
+    DirectoryDispatcher,
+}
+
+const EXPECTED_PATCH_STEPS: [&str; 18] = [
+    "01-sn65-stub.sh",
+    "02-dropbear-key.sh",
+    "03-dropbear-enable.sh",
+    "04-root-password.sh",
+    "06-eth0-dhcp.sh",
+    "08-insmod-subucom-virt.sh",
+    "09-pre-setting-ordering.sh",
+    "10-usb-drive-mount.sh",
+    "11-virtio-stream-services.sh",
+    "13-ep122-shim-preload.sh",
+    "16-xorg-modesetting-conf.sh",
+    "17-insmod-virtio-snd.sh",
+    "19-usb-external.sh",
+    "20-unbind-usb-device.sh",
+    "21-cfgd.sh",
+    "22-vanilla-kernel-fixups.sh",
+    "25-xorg-headless.sh",
+    "27-udev-usb1.sh",
+];
+
+const MERGED_DISPATCHER_SIGNATURE: &str = "# patch-rootfs.sh - auto-generated bundle dispatcher.";
+const DIRECTORY_DISPATCHER_SIGNATURE: &str = "PATCH_D=\"$PATCH_ASSETS_DIR/patch-rootfs.d\"";
+const DISPATCHER_COMPLETION_MARKER: &str = "echo \"=== All patches applied ===\"";
+
+fn validate_patch_resources(resources_dir: &Path) -> Result<ResourceProfile, PatchError> {
     let required = [
         "modules/subucom_virt.ko",
         "modules/virtio_snd.ko",
@@ -269,44 +302,146 @@ fn validate_patch_resources(resources_dir: &Path) -> Result<(), PatchError> {
             return Err(PatchError::MissingResource(path.display().to_string()));
         }
     }
+
+    let dispatcher_path = resources_dir.join("patch/patch-rootfs.sh");
+    let dispatcher = std::fs::read_to_string(&dispatcher_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            PatchError::MissingResource(dispatcher_path.display().to_string())
+        } else {
+            PatchError::Io(error)
+        }
+    })?;
     let patch_scripts = resources_dir.join("patch/patch-rootfs.d");
-    if !patch_scripts.is_dir() {
-        return Err(PatchError::MissingResource(
-            patch_scripts.display().to_string(),
-        ));
+
+    let is_merged = dispatcher.contains(MERGED_DISPATCHER_SIGNATURE);
+    let is_directory = dispatcher.contains(DIRECTORY_DISPATCHER_SIGNATURE);
+    if is_merged && is_directory {
+        return Err(PatchError::InvalidResource(format!(
+            "{} declares both merged and directory dispatcher profiles",
+            dispatcher_path.display()
+        )));
     }
-    Ok(())
+
+    if is_merged {
+        if patch_scripts.exists() {
+            return Err(PatchError::InvalidResource(format!(
+                "merged dispatcher {} must not be accompanied by {}",
+                dispatcher_path.display(),
+                patch_scripts.display()
+            )));
+        }
+        if !dispatcher.contains(DISPATCHER_COMPLETION_MARKER) {
+            return Err(PatchError::InvalidResource(format!(
+                "merged dispatcher {} is missing its completion marker",
+                dispatcher_path.display()
+            )));
+        }
+        for step in EXPECTED_PATCH_STEPS {
+            let marker = format!("echo \"--- {step} ---\"");
+            if !dispatcher.contains(&marker) {
+                return Err(PatchError::InvalidResource(format!(
+                    "merged dispatcher {} is missing step marker {step}",
+                    dispatcher_path.display()
+                )));
+            }
+        }
+        return Ok(ResourceProfile::MergedDispatcher);
+    }
+
+    if is_directory {
+        if !patch_scripts.is_dir() {
+            return Err(PatchError::MissingResource(
+                patch_scripts.display().to_string(),
+            ));
+        }
+        for step in EXPECTED_PATCH_STEPS {
+            let path = patch_scripts.join(step);
+            if !path.is_file() {
+                return Err(PatchError::MissingResource(path.display().to_string()));
+            }
+        }
+        return Ok(ResourceProfile::DirectoryDispatcher);
+    }
+
+    Err(PatchError::InvalidResource(format!(
+        "{} is neither the generated merged dispatcher nor the directory dispatcher",
+        dispatcher_path.display()
+    )))
 }
 
 #[cfg(test)]
 mod resource_tests {
-    use super::{validate_patch_resources, PatchError};
+    use super::{
+        validate_patch_resources, PatchError, ResourceProfile, DIRECTORY_DISPATCHER_SIGNATURE,
+        DISPATCHER_COMPLETION_MARKER, EXPECTED_PATCH_STEPS, MERGED_DISPATCHER_SIGNATURE,
+    };
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_RESOURCE_DIR: AtomicU64 = AtomicU64::new(0);
 
     struct ResourceDir(PathBuf);
 
     impl ResourceDir {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "cdj3k-resources-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
+            loop {
+                let sequence = NEXT_RESOURCE_DIR.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "cdj3k-resources-test-{}-{sequence}",
+                    std::process::id()
+                ));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("failed to create {}: {error}", path.display()),
+                }
+            }
         }
 
         fn path(&self) -> &Path {
             &self.0
         }
 
-        fn add(&self, relative: &str) {
+        fn write(&self, relative: &str, contents: impl AsRef<[u8]>) {
             let path = self.0.join(relative);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"fixture").unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+
+        fn add(&self, relative: &str) {
+            self.write(relative, b"fixture");
+        }
+
+        fn add_common_resources(&self) {
+            for name in ["subucom_virt.ko", "virtio_snd.ko", "udev_usb1.ko"] {
+                self.add(&format!("modules/{name}"));
+                self.add(&format!("patch/vanilla-modules/{name}"));
+            }
+            for name in ["ep122_shim.so", "subucom_forwarder", "subucom_live", "cfgd"] {
+                self.add(&format!("tools/{name}"));
+            }
+            self.add("patch/dummy_drv.so");
+        }
+
+        fn add_directory_dispatcher(&self) {
+            self.write(
+                "patch/patch-rootfs.sh",
+                format!("#!/usr/bin/env bash\n{DIRECTORY_DISPATCHER_SIGNATURE}\n"),
+            );
+            for step in EXPECTED_PATCH_STEPS {
+                self.add(&format!("patch/patch-rootfs.d/{step}"));
+            }
+        }
+
+        fn add_merged_dispatcher(&self) {
+            let mut dispatcher =
+                format!("#!/usr/bin/env bash\n{MERGED_DISPATCHER_SIGNATURE}\nset -euo pipefail\n");
+            for step in EXPECTED_PATCH_STEPS {
+                dispatcher.push_str(&format!("echo \"--- {step} ---\"\n(:)\n"));
+            }
+            dispatcher.push_str(DISPATCHER_COMPLETION_MARKER);
+            dispatcher.push('\n');
+            self.write("patch/patch-rootfs.sh", dispatcher);
         }
     }
 
@@ -317,43 +452,95 @@ mod resource_tests {
     }
 
     #[test]
-    fn canonical_resource_tree_passes_and_legacy_flat_tree_fails() {
+    fn valid_directory_dispatcher_profile_is_identified() {
         let resources = ResourceDir::new();
-        for name in [
-            "subucom_virt.ko",
-            "virtio_snd.ko",
-            "udev_usb1.ko",
-            "ep122_shim.so",
-            "subucom_forwarder",
-            "subucom_live",
-            "cfgd",
-            "patch-rootfs.sh",
-            "dummy_drv.so",
-        ] {
-            resources.add(name);
-        }
+        resources.add_common_resources();
+        resources.add_directory_dispatcher();
+
+        assert_eq!(
+            validate_patch_resources(resources.path()).unwrap(),
+            ResourceProfile::DirectoryDispatcher
+        );
+    }
+
+    #[test]
+    fn valid_merged_dispatcher_profile_is_identified() {
+        let resources = ResourceDir::new();
+        resources.add_common_resources();
+        resources.add_merged_dispatcher();
+
+        assert_eq!(
+            validate_patch_resources(resources.path()).unwrap(),
+            ResourceProfile::MergedDispatcher
+        );
+    }
+
+    #[test]
+    fn incomplete_canonical_resources_are_rejected() {
+        let resources = ResourceDir::new();
+        resources.add_common_resources();
+        resources.add_directory_dispatcher();
+        std::fs::remove_file(resources.path().join("tools/cfgd")).unwrap();
+
         assert!(matches!(
             validate_patch_resources(resources.path()),
-            Err(PatchError::MissingResource(_))
+            Err(PatchError::MissingResource(path)) if path.ends_with("tools/cfgd")
+        ));
+    }
+
+    #[test]
+    fn truncated_merged_dispatcher_is_rejected() {
+        let resources = ResourceDir::new();
+        resources.add_common_resources();
+        let mut dispatcher = format!("{MERGED_DISPATCHER_SIGNATURE}\n");
+        for step in &EXPECTED_PATCH_STEPS[..EXPECTED_PATCH_STEPS.len() - 1] {
+            dispatcher.push_str(&format!("echo \"--- {step} ---\"\n"));
+        }
+        dispatcher.push_str(DISPATCHER_COMPLETION_MARKER);
+        resources.write("patch/patch-rootfs.sh", dispatcher);
+
+        assert!(matches!(
+            validate_patch_resources(resources.path()),
+            Err(PatchError::InvalidResource(message))
+                if message.contains(EXPECTED_PATCH_STEPS[EXPECTED_PATCH_STEPS.len() - 1])
+        ));
+    }
+
+    #[test]
+    fn directory_dispatcher_with_missing_step_is_rejected() {
+        let resources = ResourceDir::new();
+        resources.add_common_resources();
+        resources.add_directory_dispatcher();
+        let missing = EXPECTED_PATCH_STEPS[7];
+        std::fs::remove_file(resources.path().join("patch/patch-rootfs.d").join(missing)).unwrap();
+
+        assert!(matches!(
+            validate_patch_resources(resources.path()),
+            Err(PatchError::MissingResource(path)) if path.ends_with(missing)
+        ));
+    }
+
+    #[test]
+    fn dispatcher_and_layout_hybrids_are_rejected() {
+        let merged_with_directory = ResourceDir::new();
+        merged_with_directory.add_common_resources();
+        merged_with_directory.add_merged_dispatcher();
+        std::fs::create_dir(merged_with_directory.path().join("patch/patch-rootfs.d")).unwrap();
+        assert!(matches!(
+            validate_patch_resources(merged_with_directory.path()),
+            Err(PatchError::InvalidResource(message)) if message.contains("must not be accompanied")
         ));
 
-        for name in ["subucom_virt.ko", "virtio_snd.ko", "udev_usb1.ko"] {
-            resources.add(&format!("modules/{name}"));
-            resources.add(&format!("patch/vanilla-modules/{name}"));
-        }
-        for name in ["ep122_shim.so", "subucom_forwarder", "subucom_live", "cfgd"] {
-            resources.add(&format!("tools/{name}"));
-        }
-        for name in ["patch-rootfs.sh", "dummy_drv.so"] {
-            resources.add(&format!("patch/{name}"));
-        }
+        let directory_without_layout = ResourceDir::new();
+        directory_without_layout.add_common_resources();
+        directory_without_layout.write(
+            "patch/patch-rootfs.sh",
+            format!("#!/usr/bin/env bash\n{DIRECTORY_DISPATCHER_SIGNATURE}\n"),
+        );
         assert!(matches!(
-            validate_patch_resources(resources.path()),
+            validate_patch_resources(directory_without_layout.path()),
             Err(PatchError::MissingResource(path)) if path.ends_with("patch/patch-rootfs.d")
         ));
-
-        std::fs::create_dir(resources.path().join("patch/patch-rootfs.d")).unwrap();
-        validate_patch_resources(resources.path()).unwrap();
     }
 }
 

@@ -2,7 +2,7 @@
 //! main 1280×720 display and the 320×240 jog LCD framebuffers.
 
 use cdj3k_emu_streams::jog_stream::{JogFrame, JOG_FB_H, JOG_FB_W};
-use cdj3k_emu_streams::main_stream::{self, DisplayDirty};
+use cdj3k_emu_streams::main_stream::{self, DisplayDirty, DisplayPayload};
 use egui::Color32;
 use glow::HasContext as _;
 
@@ -60,9 +60,21 @@ impl CdjApp {
             self.display_tex_id = Some(tex_id);
         }
 
-        // The stream supplies an owned, stable RGBA8888 snapshot (QEMU
-        // converts XRGB→RGBA on its side), packed one row after another.
         if let Some(tex) = self.display_gl_tex {
+            let pixels = match &dirty.payload {
+                DisplayPayload::Mapped(mmap) => {
+                    // Legacy macOS zero-copy path. The payload retains the
+                    // original surface stride and points into the live map.
+                    let offset = main_stream::SHM_PIXELS_OFFSET
+                        + dirty.y as usize * dirty.stride as usize
+                        + dirty.x as usize * PX_BYTES;
+                    let len = (dirty.h as usize - 1) * dirty.stride as usize
+                        + dirty.w as usize * PX_BYTES;
+                    &mmap[offset..offset + len]
+                }
+                // Sequenced WSL snapshots are already tightly packed.
+                DisplayPayload::Owned(pixels) => pixels.as_slice(),
+            };
             unsafe {
                 upload_sub_image(
                     &gl,
@@ -72,7 +84,7 @@ impl CdjApp {
                     dirty.y as i32,
                     dirty.w as i32,
                     dirty.h as i32,
-                    &dirty.pixels,
+                    pixels,
                 );
             }
         }

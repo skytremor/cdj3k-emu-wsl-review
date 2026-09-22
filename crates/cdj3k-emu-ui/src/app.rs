@@ -19,8 +19,8 @@ use cdj3k_emu_platform::menu_state;
 use cdj3k_emu_streams::ctrl_stream::{CtrlStream, LedState};
 use cdj3k_emu_streams::jog_stream::JogLcdStream;
 use cdj3k_emu_streams::main_stream::MainLcdStream;
-use cdj3k_emu_streams::ControlConnectionGate;
 use cdj3k_emu_streams::RepaintGate;
+use cdj3k_emu_streams::{ControlConnectionGate, MainDisplayMode};
 use cdj3k_emu_subucom::miso_frame::{self};
 
 use firmware_wizard::FirmwareWizard;
@@ -33,6 +33,10 @@ pub(crate) use lcd_touch::LcdTouchCapture;
 /// viewport at ~60 fps regardless of vsync rate or how many sources
 /// requested a repaint.
 pub(crate) const MIN_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+
+/// Fresh main-LCD generations to observe after QEMU starts before the legacy
+/// macOS boot spinner overlay is removed.
+const BOOT_FRAMES_THRESHOLD: u32 = 15;
 
 /// Frames the inner window size must remain stable before the aspect-snap
 /// fires (so brief pauses during a drag don't trigger a mid-drag resize).
@@ -200,6 +204,10 @@ pub struct CdjApp {
     wizard: FirmwareWizard,
     virtual_media: bool,
 
+    boot_shade_mode: BootShadeMode,
+    /// Frame count from `MainLcdStream` when QEMU most recently transitioned
+    /// to running. Used only by the upstream-compatible legacy shade policy.
+    frame_baseline_at_boot: u32,
     qemu_was_running: bool,
     /// Current rendered alpha of the boot/idle shade in [0, 1]. Linearly ramps
     /// toward the target each frame so the overlay fades in/out over 1 s.
@@ -226,9 +234,29 @@ pub struct CdjApp {
     shutdown_in_progress: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BootShadeMode {
+    /// Preserve the upstream macOS initial shade and 15-frame boot guard.
+    #[default]
+    LegacyFrameThreshold,
+    /// Linux keeps the chassis visible and shades only deliberate shutdowns.
+    LinuxLiveStatus,
+}
+
+impl BootShadeMode {
+    fn initial_shade(self) -> (f32, bool) {
+        match self {
+            Self::LegacyFrameThreshold => (1.0, true),
+            Self::LinuxLiveStatus => (0.0, false),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct CdjAppOptions {
     pub control_gate: Option<Arc<ControlConnectionGate>>,
+    pub main_display_mode: MainDisplayMode,
+    pub boot_shade_mode: BootShadeMode,
     pub firmware_resources: Option<std::path::PathBuf>,
     pub qemu_img: Option<std::path::PathBuf>,
     pub virtual_media: bool,
@@ -276,6 +304,7 @@ impl CdjApp {
         egui_ctx.set_zoom_factor(1.0);
         let app_settings = cdj3k_emu_storage::AppSettings::load();
         let repaint_gate = RepaintGate::new(egui_ctx.clone(), MIN_FRAME_INTERVAL);
+        let (shade_alpha, lcds_blanked) = options.boot_shade_mode.initial_shade();
         Self {
             jog_pos: 0,
             jog_vel: JOG_VEL_INIT,
@@ -313,9 +342,10 @@ impl CdjApp {
                 repaint_gate.clone(),
                 options.control_gate.clone(),
             ),
-            display_stream: MainLcdStream::new_with_control_gate(
+            display_stream: MainLcdStream::new_with_mode_and_control_gate(
                 &socket_dir,
                 repaint_gate.clone(),
+                options.main_display_mode,
                 options.control_gate.clone(),
             ),
             display_gl_tex: None,
@@ -353,11 +383,17 @@ impl CdjApp {
             jog_dbg_last_dt: 0.0,
             jog_dbg_last_omega_sample: 0.0,
             jog_dbg_lines: [String::new(), String::new(), String::new()],
-            wizard: FirmwareWizard::new_with_options(options.firmware_resources, options.qemu_img),
+            wizard: FirmwareWizard::new_with_boot_shade_mode(
+                options.firmware_resources,
+                options.qemu_img,
+                options.boot_shade_mode,
+            ),
             virtual_media: options.virtual_media,
+            boot_shade_mode: options.boot_shade_mode,
+            frame_baseline_at_boot: 0,
             qemu_was_running: false,
-            shade_alpha: 0.0,
-            lcds_blanked: false,
+            shade_alpha,
+            lcds_blanked,
             lcd_textures_need_blank: false,
             debug_snapshot: Arc::new(Mutex::new(ui::DebugSnapshot::default())),
             debug_viewport_state: Arc::new(Mutex::new(DebugViewportState::default())),
@@ -442,9 +478,12 @@ impl eframe::App for CdjApp {
 
         #[cfg(target_os = "macos")]
         MENU_SETUP.call_once(cdj3k_emu_platform::menu::setup_menu);
-        self.poll_menu_state();
         #[cfg(target_os = "linux")]
         self.draw_linux_operator_bar(ctx);
+        // Linux operator actions update shared state synchronously. Poll after
+        // drawing so View toggles reach the local viewport flags this frame
+        // instead of being overwritten by the previous local values.
+        self.poll_menu_state();
 
         // Blank LCD textures after a QEMU exit so popouts go black instead
         // of holding the last captured frame.
@@ -862,14 +901,19 @@ impl CdjApp {
         }
     }
 
-    /// Step the deliberate-shutdown shade alpha toward its target. The
-    /// chassis and LCD placeholders remain visible while QEMU boots or fails;
-    /// stream connection state is rendered by the UI itself.
+    /// Step the selected boot/shutdown shade policy toward its target.
     fn tick_boot_shade(&mut self, ctx: &egui::Context) -> (bool, f32) {
         let (qemu_running, shade_forced) = {
             let s = menu_state::lock();
             (s.qemu_running, s.shade_forced)
         };
+        self.frame_baseline_at_boot = frame_baseline_after_transition(
+            self.boot_shade_mode,
+            qemu_running,
+            self.qemu_was_running,
+            self.display_stream.frames_seen(),
+            self.frame_baseline_at_boot,
+        );
         // QEMU just exited: blank LCD textures so popout windows go black.
         let qemu_just_exited = self.qemu_was_running && !qemu_running;
         self.qemu_was_running = qemu_running;
@@ -877,8 +921,13 @@ impl CdjApp {
             self.lcd_textures_need_blank = true;
         }
 
-        let booting = shade_forced;
-        let target_alpha: f32 = if booting { 1.0 } else { 0.0 };
+        let (booting, target_alpha) = boot_shade_target(
+            self.boot_shade_mode,
+            qemu_running,
+            shade_forced,
+            self.display_stream.frames_seen(),
+            self.frame_baseline_at_boot,
+        );
 
         // Linear ramp toward target (configurable speed).
         let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
@@ -932,6 +981,42 @@ impl CdjApp {
     }
 }
 
+fn frame_baseline_after_transition(
+    mode: BootShadeMode,
+    qemu_running: bool,
+    qemu_was_running: bool,
+    frames_seen: u32,
+    current_baseline: u32,
+) -> u32 {
+    if mode == BootShadeMode::LegacyFrameThreshold && qemu_running && !qemu_was_running {
+        frames_seen
+    } else {
+        current_baseline
+    }
+}
+
+fn boot_shade_target(
+    mode: BootShadeMode,
+    qemu_running: bool,
+    shade_forced: bool,
+    frames_seen: u32,
+    frame_baseline_at_boot: u32,
+) -> (bool, f32) {
+    match mode {
+        BootShadeMode::LegacyFrameThreshold => {
+            let frames_since_boot = frames_seen.saturating_sub(frame_baseline_at_boot);
+            let booting =
+                (qemu_running && frames_since_boot < BOOT_FRAMES_THRESHOLD) || shade_forced;
+            let target = if !qemu_running || booting { 1.0 } else { 0.0 };
+            (booting, target)
+        }
+        BootShadeMode::LinuxLiveStatus => {
+            let booting = shade_forced;
+            (booting, if booting { 1.0 } else { 0.0 })
+        }
+    }
+}
+
 fn stream_state_label(connected: bool, has_tex: bool, prefix: &'static str) -> String {
     let suffix = match (connected, has_tex) {
         (true, true) => "OK",
@@ -939,4 +1024,79 @@ fn stream_state_label(connected: bool, has_tex: bool, prefix: &'static str) -> S
         _ => "wait",
     };
     format!("{prefix}:{suffix}")
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::{
+        boot_shade_target, frame_baseline_after_transition, BootShadeMode, CdjAppOptions,
+        BOOT_FRAMES_THRESHOLD,
+    };
+
+    #[test]
+    fn app_options_default_to_upstream_shade_policy() {
+        assert_eq!(
+            CdjAppOptions::default().boot_shade_mode,
+            BootShadeMode::LegacyFrameThreshold
+        );
+        assert_eq!(
+            BootShadeMode::LegacyFrameThreshold.initial_shade(),
+            (1.0, true)
+        );
+    }
+
+    #[test]
+    fn legacy_shade_uses_boot_baseline_and_fifteen_frame_threshold() {
+        let baseline = frame_baseline_after_transition(
+            BootShadeMode::LegacyFrameThreshold,
+            true,
+            false,
+            41,
+            0,
+        );
+        assert_eq!(baseline, 41);
+        assert_eq!(
+            boot_shade_target(
+                BootShadeMode::LegacyFrameThreshold,
+                true,
+                false,
+                baseline + BOOT_FRAMES_THRESHOLD - 1,
+                baseline,
+            ),
+            (true, 1.0)
+        );
+        assert_eq!(
+            boot_shade_target(
+                BootShadeMode::LegacyFrameThreshold,
+                true,
+                false,
+                baseline + BOOT_FRAMES_THRESHOLD,
+                baseline,
+            ),
+            (false, 0.0)
+        );
+        assert_eq!(
+            boot_shade_target(
+                BootShadeMode::LegacyFrameThreshold,
+                false,
+                false,
+                baseline,
+                baseline,
+            ),
+            (false, 1.0)
+        );
+    }
+
+    #[test]
+    fn linux_live_status_ignores_frame_threshold_but_honors_shutdown_shade() {
+        assert_eq!(BootShadeMode::LinuxLiveStatus.initial_shade(), (0.0, false));
+        assert_eq!(
+            boot_shade_target(BootShadeMode::LinuxLiveStatus, true, false, 0, 99),
+            (false, 0.0)
+        );
+        assert_eq!(
+            boot_shade_target(BootShadeMode::LinuxLiveStatus, false, true, 0, 99),
+            (true, 1.0)
+        );
+    }
 }

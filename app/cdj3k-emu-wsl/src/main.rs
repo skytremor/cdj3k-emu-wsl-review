@@ -182,6 +182,9 @@ mod linux {
                     args.profile,
                     cdj3k_emu_ui::app::CdjAppOptions {
                         control_gate: Some(Arc::clone(&control_gate)),
+                        main_display_mode:
+                            cdj3k_emu_streams::MainDisplayMode::SequencedStableSnapshot,
+                        boot_shade_mode: cdj3k_emu_ui::app::BootShadeMode::LinuxLiveStatus,
                         firmware_resources: args.resources.clone(),
                         qemu_img: Some(qemu_img),
                         virtual_media: config.virtual_media,

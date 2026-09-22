@@ -732,6 +732,8 @@ mod tests {
         assert!(has_arg(&args, "/build/initramfs"));
         assert!(has_arg(&args, "-display"));
         assert!(arg_starting_with(&args, "shm,path=").ends_with("/main.shm"));
+        assert!(has_arg(&args, "-qmp"));
+        assert!(has_arg(&args, "tcp:localhost:4445,server=on,wait=off"));
         assert!(has_arg(
             &args,
             "virtio-gpu-device,id=virtio-gpu0,xres=1280,yres=720,max_outputs=1"

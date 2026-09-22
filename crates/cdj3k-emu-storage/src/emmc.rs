@@ -246,3 +246,22 @@ fn convert_to_qcow2(raw: &Path, out: &Path, qemu_img: Option<&Path>) -> std::io:
         Err(std::io::Error::other("qemu-img convert failed"))
     }
 }
+
+#[cfg(test)]
+mod contract_tests {
+    use super::EmmcConfig;
+    use std::path::PathBuf;
+
+    #[test]
+    fn new_retains_native_bundled_qemu_img_lookup() {
+        let path = PathBuf::from("/state/emmc.qcow2");
+        let config = EmmcConfig::new(path.clone(), 7);
+
+        assert_eq!(config.path, path);
+        assert_eq!(config.instance_id, 7);
+        assert!(config.qemu_img.is_none());
+        assert!(config.firmware.release.is_none());
+        assert!(config.firmware.rev_apl.is_none());
+        assert!(config.firmware.rev_kernel.is_none());
+    }
+}

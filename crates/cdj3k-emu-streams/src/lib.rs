@@ -5,4 +5,5 @@ pub mod main_stream;
 pub mod repaint_gate;
 
 pub use control_gate::{ControlConnectionGate, LaunchEpoch};
+pub use main_stream::{DisplayPayload, MainDisplayMode};
 pub use repaint_gate::RepaintGate;

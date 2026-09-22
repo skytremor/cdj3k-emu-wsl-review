@@ -3,7 +3,7 @@
 //! Shm file layout (written by qemu/patch/shm-display.c):
 //!
 //!   [0]   u32  magic       0x514D5348  ("QMS\x00")
-//!   [4]   u32  generation  odd while writing, even after every dirty blit
+//!   [4]   u32  generation  publication counter (protocol depends on mode)
 //!   [8]   u32  width
 //!   [12]  u32  height
 //!   [16]  u32  stride      bytes per row
@@ -14,10 +14,10 @@
 //!   [36]  u32  dirty_h
 //!   [64]  u8[] pixels      stride × height bytes
 //!
-//! The reader polls `generation` with Acquire semantics; it accepts only an
-//! even generation that remains unchanged while dirty_x/y/w/h and pixel data
-//! are copied into an owned buffer. This prevents QEMU from modifying the live
-//! mmap while the UI/OpenGL thread consumes a frame.
+//! The original macOS writer increments `generation` once after each completed
+//! blit. The WSL writer uses odd values while writing and even values for stable
+//! frames. [`MainDisplayMode`] keeps those contracts explicit so WSL's stronger
+//! snapshot protocol does not change the established macOS path.
 //!
 //! Pixel format: format=1 (RGBA8888, R,G,B,A byte order).
 //! shm_gfx_update converts XRGB8888→RGBA8888 on the QEMU side so the host
@@ -46,16 +46,38 @@ const POLL_INTERVAL: Duration = Duration::from_micros(500);
 /// Backoff between "shm not yet present" / "magic gone" retries.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
-/// A dirty-region notification with an owned, stable pixel snapshot.
+/// Publication and ownership policy for the main-display shared memory.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MainDisplayMode {
+    /// Original macOS contract: every changed generation is published and the
+    /// UI uploads directly from the live shared-memory mapping.
+    #[default]
+    LegacyPublishedGeneration,
+    /// WSL contract: odd means writing; an unchanged, nonzero even generation
+    /// is copied into owned memory before publication.
+    SequencedStableSnapshot,
+}
+
+pub const DEFAULT_MAIN_DISPLAY_MODE: MainDisplayMode = MainDisplayMode::LegacyPublishedGeneration;
+
+/// Pixel storage carried by a dirty-region notification.
+pub enum DisplayPayload {
+    /// Live QEMU mapping used by the legacy zero-copy upload path.
+    Mapped(Arc<Mmap>),
+    /// Stable, tightly packed RGBA rows used by the sequenced WSL path.
+    Owned(Vec<u8>),
+}
+
+/// A dirty-region notification with mode-specific pixel ownership.
 pub struct DisplayDirty {
     pub x: u32,
     pub y: u32,
     pub w: u32,
     pub h: u32,
-    /// Row stride in bytes. For owned snapshots this is `w * 4`.
+    /// Row stride in bytes. Mapped payloads retain the surface stride; owned
+    /// payloads use the tightly packed `w * 4` stride.
     pub stride: u32,
-    /// Packed RGBA rows for this dirty rectangle.
-    pub pixels: Vec<u8>,
+    pub payload: DisplayPayload,
 }
 
 /// Background-thread shm reader for the main LCD.
@@ -71,12 +93,34 @@ pub struct MainLcdStream {
 
 impl MainLcdStream {
     pub fn new(socket_dir: &str, gate: crate::RepaintGate) -> Self {
-        Self::new_with_control_gate(socket_dir, gate, None)
+        Self::new_with_mode_and_control_gate(socket_dir, gate, DEFAULT_MAIN_DISPLAY_MODE, None)
     }
 
     pub fn new_with_control_gate(
         socket_dir: &str,
         gate: crate::RepaintGate,
+        control_gate: Option<Arc<crate::ControlConnectionGate>>,
+    ) -> Self {
+        Self::new_with_mode_and_control_gate(
+            socket_dir,
+            gate,
+            DEFAULT_MAIN_DISPLAY_MODE,
+            control_gate,
+        )
+    }
+
+    pub fn new_with_mode(
+        socket_dir: &str,
+        gate: crate::RepaintGate,
+        mode: MainDisplayMode,
+    ) -> Self {
+        Self::new_with_mode_and_control_gate(socket_dir, gate, mode, None)
+    }
+
+    pub fn new_with_mode_and_control_gate(
+        socket_dir: &str,
+        gate: crate::RepaintGate,
+        mode: MainDisplayMode,
         control_gate: Option<Arc<crate::ControlConnectionGate>>,
     ) -> Self {
         let shm_path = format!("{}/main.shm", socket_dir.trim_end_matches('/'));
@@ -97,6 +141,7 @@ impl MainLcdStream {
                     connected_clone,
                     frames_seen_clone,
                     gate,
+                    mode,
                     control_gate,
                 )
             })
@@ -139,6 +184,7 @@ fn shm_loop(
     connected: Arc<AtomicBool>,
     frames_seen: Arc<AtomicU32>,
     gate: crate::RepaintGate,
+    mode: MainDisplayMode,
     control_gate: Option<Arc<crate::ControlConnectionGate>>,
 ) {
     let mut wait_logged = false;
@@ -175,6 +221,7 @@ fn shm_loop(
             &slot,
             &frames_seen,
             &gate,
+            mode,
             control_gate.as_ref(),
             launch_epoch,
         );
@@ -195,13 +242,11 @@ fn poll_loop(
     slot: &Arc<Mutex<Option<DisplayDirty>>>,
     frames_seen: &Arc<AtomicU32>,
     gate: &crate::RepaintGate,
+    mode: MainDisplayMode,
     control_gate: Option<&Arc<crate::ControlConnectionGate>>,
     launch_epoch: Option<crate::LaunchEpoch>,
 ) {
-    // Treat the already-published generation as the first event. QEMU writes
-    // an initial full frame before the host reader can attach; subtracting one
-    // makes that static frame visible instead of waiting for the next damage.
-    let mut last_gen: u32 = read_u32(mmap, 4).wrapping_sub(1);
+    let mut generations = GenerationTracker::new(mode, read_u32(mmap, 4));
 
     // Local dirty rect accumulator (x0, y0, x1, y1).
     // Accumulates the union of all dirty rects received since the last
@@ -227,11 +272,15 @@ fn poll_loop(
         // Acquire load of generation - pairs with QEMU's RELEASE stores.
         let gen = read_u32_acquire(mmap, 4);
 
-        if gen == last_gen || !generation_is_stable(gen, gen) {
+        let Some(generation_event) = generations.observe(gen) else {
             continue;
-        }
+        };
         puffin::profile_scope!("main_lcd_gen_bump");
-        last_gen = gen;
+        if generation_event.count_immediately {
+            // Preserve upstream accounting: a legacy publication is counted
+            // when its generation changes, even if the UI slot is occupied.
+            frames_seen.fetch_add(1, Ordering::Relaxed);
+        }
         // Re-read dimensions on every frame - the surface can switch
         // mid-session (e.g. initial 640×480 QEMU console → 1280×720 Xorg).
         let width = read_u32(mmap, 8) as usize;
@@ -239,7 +288,7 @@ fn poll_loop(
         let stride = read_u32(mmap, 16) as usize;
         let format = read_u32(mmap, 20);
 
-        if !valid_frame(width, height, stride, format, mmap.len()) {
+        if !valid_frame(mode, width, height, stride, format, mmap.len()) {
             continue;
         }
 
@@ -261,23 +310,20 @@ fn poll_loop(
             && dh != 0
             && dx.checked_add(dw).is_some_and(|end| end <= width)
             && dy.checked_add(dh).is_some_and(|end| end <= height);
-        if !dirty_valid && !first_frame && !surface_changed {
+        let force_full_frame =
+            mode == MainDisplayMode::SequencedStableSnapshot && (first_frame || surface_changed);
+        if !dirty_valid && !force_full_frame {
             continue;
         }
 
-        let (dx, dy, dw, dh) = if first_frame || surface_changed {
+        let (dx, dy, dw, dh) = if force_full_frame {
             (0, 0, width, height)
         } else {
             (dx, dy, dw, dh)
         };
 
         // Expand the local accumulator to cover this dirty rect.
-        acc = Some(match acc {
-            None => (dx, dy, dx + dw, dy + dh),
-            Some((ax0, ay0, ax1, ay1)) => {
-                (ax0.min(dx), ay0.min(dy), ax1.max(dx + dw), ay1.max(dy + dh))
-            }
-        });
+        acc = accumulate_dirty(acc, dx, dy, dw, dh);
 
         // Try to publish the accumulated region.  If the slot is still
         // occupied the accumulator keeps growing - next tick will cover
@@ -288,21 +334,16 @@ fn poll_loop(
                     let uw = x1 - x0;
                     let uh = y1 - y0;
 
-                    if let Some(pixels) =
-                        copy_stable_rect(mmap, gen, x0, y0, uw, uh, stride, width, height)
+                    if let Some(dirty) =
+                        build_display_dirty(mmap, mode, gen, x0, y0, uw, uh, stride, width, height)
                     {
-                        *g = Some(DisplayDirty {
-                            x: x0 as u32,
-                            y: y0 as u32,
-                            w: uw as u32,
-                            h: uh as u32,
-                            stride: (uw * 4) as u32,
-                            pixels,
-                        });
+                        *g = Some(dirty);
                         if let (Some(control_gate), Some(epoch)) = (control_gate, launch_epoch) {
                             control_gate.observe_main(epoch, gen, width as u32, height as u32);
                         }
-                        frames_seen.fetch_add(1, Ordering::Relaxed);
+                        if !generation_event.count_immediately {
+                            frames_seen.fetch_add(1, Ordering::Relaxed);
+                        }
                         first_frame = false;
                         gate.request();
                     } else {
@@ -315,7 +356,108 @@ fn poll_loop(
     }
 }
 
-fn valid_frame(width: usize, height: usize, stride: usize, format: u32, map_len: usize) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GenerationEvent {
+    count_immediately: bool,
+}
+
+struct GenerationTracker {
+    mode: MainDisplayMode,
+    last: u32,
+}
+
+impl GenerationTracker {
+    fn new(mode: MainDisplayMode, initial: u32) -> Self {
+        let last = match mode {
+            // Upstream waited for the next generation after attaching.
+            MainDisplayMode::LegacyPublishedGeneration => initial,
+            // WSL may have published its only full frame before the reader
+            // maps the file, so consume an already-stable initial generation.
+            MainDisplayMode::SequencedStableSnapshot => initial.wrapping_sub(1),
+        };
+        Self { mode, last }
+    }
+
+    fn observe(&mut self, generation: u32) -> Option<GenerationEvent> {
+        if generation == self.last {
+            return None;
+        }
+        if self.mode == MainDisplayMode::SequencedStableSnapshot
+            && !generation_is_stable(generation, generation)
+        {
+            return None;
+        }
+        self.last = generation;
+        Some(GenerationEvent {
+            count_immediately: self.mode == MainDisplayMode::LegacyPublishedGeneration,
+        })
+    }
+}
+
+fn build_display_dirty(
+    mmap: &Arc<Mmap>,
+    mode: MainDisplayMode,
+    generation: u32,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+    surface_width: usize,
+    surface_height: usize,
+) -> Option<DisplayDirty> {
+    let (payload, published_stride) = match mode {
+        MainDisplayMode::LegacyPublishedGeneration => {
+            (DisplayPayload::Mapped(Arc::clone(mmap)), stride)
+        }
+        MainDisplayMode::SequencedStableSnapshot => (
+            DisplayPayload::Owned(copy_stable_rect(
+                mmap,
+                generation,
+                x,
+                y,
+                width,
+                height,
+                stride,
+                surface_width,
+                surface_height,
+            )?),
+            width.checked_mul(4)?,
+        ),
+    };
+    Some(DisplayDirty {
+        x: x.try_into().ok()?,
+        y: y.try_into().ok()?,
+        w: width.try_into().ok()?,
+        h: height.try_into().ok()?,
+        stride: published_stride.try_into().ok()?,
+        payload,
+    })
+}
+
+fn accumulate_dirty(
+    acc: Option<(usize, usize, usize, usize)>,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let x1 = x.checked_add(width)?;
+    let y1 = y.checked_add(height)?;
+    Some(match acc {
+        None => (x, y, x1, y1),
+        Some((ax0, ay0, ax1, ay1)) => (ax0.min(x), ay0.min(y), ax1.max(x1), ay1.max(y1)),
+    })
+}
+
+fn valid_frame(
+    mode: MainDisplayMode,
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: u32,
+    map_len: usize,
+) -> bool {
     let Some(row_bytes) = width.checked_mul(4) else {
         return false;
     };
@@ -327,7 +469,11 @@ fn valid_frame(width: usize, height: usize, stride: usize, format: u32, map_len:
     };
     width != 0
         && height != 0
-        && format == SHM_FORMAT_RGBA8888
+        // The upstream reader did not gate legacy publications on the format
+        // word. Retain that behavior; the new sequenced path validates its
+        // owned RGBA snapshot explicitly.
+        && (mode == MainDisplayMode::LegacyPublishedGeneration
+            || format == SHM_FORMAT_RGBA8888)
         && stride >= row_bytes
         && frame_end <= map_len
 }
@@ -417,17 +563,93 @@ fn read_u32_acquire(mmap: &Mmap, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_stable_rect, generation_is_stable, valid_frame, SHM_FORMAT_RGBA8888, SHM_MAGIC,
-        SHM_PIXELS_OFFSET,
+        accumulate_dirty, build_display_dirty, copy_stable_rect, generation_is_stable, valid_frame,
+        DisplayPayload, GenerationTracker, MainDisplayMode, DEFAULT_MAIN_DISPLAY_MODE,
+        SHM_FORMAT_RGBA8888, SHM_MAGIC, SHM_PIXELS_OFFSET,
     };
     use std::fs::OpenOptions;
     use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(0);
+
+    struct TestMap {
+        mmap: Arc<memmap2::Mmap>,
+        path: PathBuf,
+    }
+
+    impl TestMap {
+        fn new(generation: u32, width: u32, height: u32, stride: u32, pixels: &[u8]) -> Self {
+            let unique = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "cdj3k-main-stream-test-{}-{}-{unique}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let size = SHM_PIXELS_OFFSET + pixels.len();
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            file.set_len(size as u64).unwrap();
+            let mut header = [0u8; SHM_PIXELS_OFFSET];
+            header[0..4].copy_from_slice(&SHM_MAGIC.to_le_bytes());
+            header[4..8].copy_from_slice(&generation.to_le_bytes());
+            header[8..12].copy_from_slice(&width.to_le_bytes());
+            header[12..16].copy_from_slice(&height.to_le_bytes());
+            header[16..20].copy_from_slice(&stride.to_le_bytes());
+            header[20..24].copy_from_slice(&SHM_FORMAT_RGBA8888.to_le_bytes());
+            header[24..28].copy_from_slice(&0u32.to_le_bytes());
+            header[28..32].copy_from_slice(&0u32.to_le_bytes());
+            header[32..36].copy_from_slice(&width.to_le_bytes());
+            header[36..40].copy_from_slice(&height.to_le_bytes());
+            file.write_all(&header).unwrap();
+            file.write_all(pixels).unwrap();
+            file.sync_all().unwrap();
+            let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file).unwrap() });
+            Self { mmap, path }
+        }
+    }
+
+    impl Drop for TestMap {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn legacy_is_the_default_display_contract() {
+        assert_eq!(
+            MainDisplayMode::default(),
+            MainDisplayMode::LegacyPublishedGeneration
+        );
+        assert_eq!(
+            DEFAULT_MAIN_DISPLAY_MODE,
+            MainDisplayMode::LegacyPublishedGeneration
+        );
+    }
 
     #[test]
     fn rejects_invalid_frame_headers() {
-        assert!(!valid_frame(0, 720, 5120, SHM_FORMAT_RGBA8888, 8 << 20));
-        assert!(!valid_frame(1280, 720, 5120, 0, 8 << 20));
+        let sequenced = MainDisplayMode::SequencedStableSnapshot;
         assert!(!valid_frame(
+            sequenced,
+            0,
+            720,
+            5120,
+            SHM_FORMAT_RGBA8888,
+            8 << 20
+        ));
+        assert!(!valid_frame(sequenced, 1280, 720, 5120, 0, 8 << 20));
+        assert!(!valid_frame(
+            sequenced,
             1280,
             720,
             5120,
@@ -435,60 +657,128 @@ mod tests {
             SHM_PIXELS_OFFSET
         ));
         assert!(!valid_frame(
+            sequenced,
             usize::MAX,
             2,
             usize::MAX,
             SHM_FORMAT_RGBA8888,
             usize::MAX
         ));
+        assert!(valid_frame(
+            MainDisplayMode::LegacyPublishedGeneration,
+            4,
+            2,
+            16,
+            0,
+            SHM_PIXELS_OFFSET + 32
+        ));
     }
 
     #[test]
-    fn accepts_only_unchanged_even_generations() {
+    fn sequenced_stability_requires_same_nonzero_even_generation() {
+        assert!(!generation_is_stable(0, 0));
         assert!(!generation_is_stable(1, 1));
         assert!(!generation_is_stable(2, 4));
         assert!(generation_is_stable(2, 2));
     }
 
     #[test]
-    fn copies_owned_rect_only_after_stable_generation() {
-        let path = std::env::temp_dir().join(format!(
-            "cdj3k-main-stream-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let size = SHM_PIXELS_OFFSET + 32;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .unwrap();
-        file.set_len(size as u64).unwrap();
-        let mut header = [0u8; SHM_PIXELS_OFFSET];
-        header[0..4].copy_from_slice(&SHM_MAGIC.to_le_bytes());
-        header[4..8].copy_from_slice(&2u32.to_le_bytes());
-        header[8..12].copy_from_slice(&4u32.to_le_bytes());
-        header[12..16].copy_from_slice(&2u32.to_le_bytes());
-        header[16..20].copy_from_slice(&16u32.to_le_bytes());
-        header[20..24].copy_from_slice(&SHM_FORMAT_RGBA8888.to_le_bytes());
-        header[24..28].copy_from_slice(&0u32.to_le_bytes());
-        header[28..32].copy_from_slice(&0u32.to_le_bytes());
-        header[32..36].copy_from_slice(&4u32.to_le_bytes());
-        header[36..40].copy_from_slice(&2u32.to_le_bytes());
-        file.write_all(&header).unwrap();
-        file.write_all(&(1u8..=32).collect::<Vec<_>>()).unwrap();
-        file.sync_all().unwrap();
-        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
-        let pixels = copy_stable_rect(&mmap, 2, 1, 0, 2, 2, 16, 4, 2).unwrap();
+    fn legacy_accepts_every_changed_generation_and_preserves_initial_wait() {
+        let mut tracker = GenerationTracker::new(MainDisplayMode::LegacyPublishedGeneration, 1);
+        assert!(tracker.observe(1).is_none());
+        for generation in [2, 3, 4] {
+            let event = tracker.observe(generation).unwrap();
+            assert!(event.count_immediately);
+        }
+    }
+
+    #[test]
+    fn sequenced_accepts_initial_even_frame_then_only_stable_publications() {
+        let mut tracker = GenerationTracker::new(MainDisplayMode::SequencedStableSnapshot, 2);
+        assert!(!tracker.observe(2).unwrap().count_immediately);
+        assert!(tracker.observe(3).is_none());
+        assert!(!tracker.observe(4).unwrap().count_immediately);
+        assert!(tracker.observe(4).is_none());
+
+        let mut zero = GenerationTracker::new(MainDisplayMode::SequencedStableSnapshot, 0);
+        assert!(zero.observe(0).is_none());
+        assert!(zero.observe(1).is_none());
+        assert!(zero.observe(2).is_some());
+    }
+
+    #[test]
+    fn dirty_rectangles_accumulate_to_their_union() {
+        let acc = accumulate_dirty(None, 10, 20, 5, 7).unwrap();
+        assert_eq!(acc, (10, 20, 15, 27));
+        let acc = accumulate_dirty(Some(acc), 4, 24, 20, 10).unwrap();
+        assert_eq!(acc, (4, 20, 24, 34));
+        assert!(accumulate_dirty(None, usize::MAX, 0, 2, 1).is_none());
+    }
+
+    #[test]
+    fn stable_copy_packs_rows_and_rejects_changed_or_odd_generation() {
+        let map = TestMap::new(2, 4, 2, 16, &(1u8..=32).collect::<Vec<_>>());
+        let pixels = copy_stable_rect(&map.mmap, 2, 1, 0, 2, 2, 16, 4, 2).unwrap();
         assert_eq!(
             pixels,
             vec![5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23, 24, 25, 26, 27, 28]
         );
-        std::fs::remove_file(path).unwrap();
+        assert!(copy_stable_rect(&map.mmap, 1, 1, 0, 2, 2, 16, 4, 2).is_none());
+        assert!(copy_stable_rect(&map.mmap, 4, 1, 0, 2, 2, 16, 4, 2).is_none());
+    }
+
+    #[test]
+    fn legacy_payload_is_mapped_with_surface_stride() {
+        let map = TestMap::new(3, 4, 2, 20, &(1u8..=40).collect::<Vec<_>>());
+        let dirty = build_display_dirty(
+            &map.mmap,
+            MainDisplayMode::LegacyPublishedGeneration,
+            3,
+            1,
+            0,
+            2,
+            2,
+            20,
+            4,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            (dirty.x, dirty.y, dirty.w, dirty.h, dirty.stride),
+            (1, 0, 2, 2, 20)
+        );
+        match dirty.payload {
+            DisplayPayload::Mapped(mapped) => assert!(Arc::ptr_eq(&mapped, &map.mmap)),
+            DisplayPayload::Owned(_) => panic!("legacy mode unexpectedly copied pixels"),
+        }
+    }
+
+    #[test]
+    fn sequenced_payload_is_owned_and_tightly_packed() {
+        let map = TestMap::new(2, 4, 2, 20, &(1u8..=40).collect::<Vec<_>>());
+        let dirty = build_display_dirty(
+            &map.mmap,
+            MainDisplayMode::SequencedStableSnapshot,
+            2,
+            1,
+            0,
+            2,
+            2,
+            20,
+            4,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            (dirty.x, dirty.y, dirty.w, dirty.h, dirty.stride),
+            (1, 0, 2, 2, 8)
+        );
+        match dirty.payload {
+            DisplayPayload::Owned(pixels) => assert_eq!(
+                pixels,
+                vec![5, 6, 7, 8, 9, 10, 11, 12, 25, 26, 27, 28, 29, 30, 31, 32]
+            ),
+            DisplayPayload::Mapped(_) => panic!("sequenced mode did not own its snapshot"),
+        }
     }
 }

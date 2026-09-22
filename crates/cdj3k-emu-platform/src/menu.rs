@@ -252,7 +252,12 @@ pub fn sync_menu() {
 
     while let Ok(event) = MenuEvent::receiver().try_recv() {
         let id = event.id.0.as_str();
-        handle_event(id, &mut pending_create, &mut pending_mount);
+        handle_event(
+            id,
+            ActionOrigin::NativeMenu,
+            &mut pending_create,
+            &mut pending_mount,
+        );
     }
 
     // ── File pickers (must run after event poll, same frame) ─────────────────
@@ -388,7 +393,12 @@ pub fn sync_menu() {
 pub fn trigger_action(id: &str) {
     let mut pending_create = false;
     let mut pending_mount = false;
-    handle_event(id, &mut pending_create, &mut pending_mount);
+    handle_event(
+        id,
+        ActionOrigin::LinuxOperator,
+        &mut pending_create,
+        &mut pending_mount,
+    );
 
     if pending_create {
         if let Some(path) = rfd::FileDialog::new().set_file_name("usb.img").save_file() {
@@ -428,8 +438,41 @@ struct MenuSnap {
 
 // ── Event dispatch ────────────────────────────────────────────────────────────
 
-fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionOrigin {
+    NativeMenu,
+    LinuxOperator,
+}
+
+impl ActionOrigin {
+    fn force_legacy_shade(self, state: &mut menu_state::AppState) {
+        if self == Self::NativeMenu {
+            state.shade_forced = true;
+        }
+    }
+}
+
+fn handle_event(
+    id: &str,
+    origin: ActionOrigin,
+    pending_create: &mut bool,
+    pending_mount: &mut bool,
+) {
     let mut s = menu_state::lock();
+    let launch = apply_action(&mut s, id, origin, pending_create, pending_mount);
+    drop(s);
+    if let Some(instance) = launch {
+        launch_instance(instance);
+    }
+}
+
+fn apply_action(
+    s: &mut menu_state::AppState,
+    id: &str,
+    origin: ActionOrigin,
+    pending_create: &mut bool,
+    pending_mount: &mut bool,
+) -> Option<u32> {
     match id {
         "install_firmware" => {
             s.firmware_wizard_requested = true;
@@ -438,6 +481,7 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
             s.qemu_boot_requested = true;
         }
         "restart" => {
+            origin.force_legacy_shade(s);
             s.restart_requested = true;
         }
         "stop" => {
@@ -445,10 +489,12 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
         }
         "service_mode" => {
             s.service_mode = !s.service_mode;
+            origin.force_legacy_shade(s);
             s.restart_requested = true;
         }
         "audio" => {
             s.audio_enabled = !s.audio_enabled;
+            origin.force_legacy_shade(s);
             s.audio_toggle_requested = true;
         }
         "alc" => {
@@ -469,9 +515,15 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
         "main_screen" => s.main_screen_popped = !s.main_screen_popped,
         "debug_screen" => s.debug_screen_popped = !s.debug_screen_popped,
         "net_none" => {
+            if s.selected_interface != menu_state::NET_SEL_NONE {
+                origin.force_legacy_shade(s);
+            }
             s.selected_interface = menu_state::NET_SEL_NONE;
         }
         "net_vmnet_host" => {
+            if s.selected_interface != menu_state::NET_SEL_VMNET_HOST {
+                origin.force_legacy_shade(s);
+            }
             s.selected_interface = menu_state::NET_SEL_VMNET_HOST;
         }
         "create_virtual_usb" => {
@@ -487,6 +539,7 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
             if s.audio_device_uid.is_some() {
                 s.audio_device_uid = None;
                 s.audio_device_toggle_requested = true;
+                origin.force_legacy_shade(s);
             }
         }
         other => {
@@ -498,10 +551,14 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
                     if s.audio_device_uid.as_deref() != Some(uid.as_str()) {
                         s.audio_device_uid = Some(uid);
                         s.audio_device_toggle_requested = true;
+                        origin.force_legacy_shade(s);
                     }
                 }
             } else if let Some(rest) = other.strip_prefix("net_if_") {
                 if let Ok(n) = rest.parse::<u32>() {
+                    if s.selected_interface != n {
+                        origin.force_legacy_shade(s);
+                    }
                     s.selected_interface = n;
                 }
             } else if let Some(rest) = other.strip_prefix("phys_select_") {
@@ -515,14 +572,12 @@ fn handle_event(id: &str, pending_create: &mut bool, pending_mount: &mut bool) {
                 }
             } else if let Some(rest) = other.strip_prefix("instance_") {
                 if let Ok(n) = rest.parse::<u32>() {
-                    // launch_instance reads CURRENT_INSTANCE_ID via lock; drop guard first.
-                    drop(s);
-                    launch_instance(n);
-                    return;
+                    return Some(n);
                 }
             }
         }
     }
+    None
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -706,5 +761,91 @@ fn rebuild_phys_submenu(submenu: &Submenu) {
         let item =
             CheckMenuItem::with_id(format!("phys_select_{i}"), &disk.label, true, false, None);
         submenu.append(&item).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_action, ActionOrigin};
+    use crate::menu_state::{AppState, NET_SEL_NONE, NET_SEL_VMNET_HOST};
+
+    fn apply(state: &mut AppState, action: &str, origin: ActionOrigin) {
+        let mut pending_create = false;
+        let mut pending_mount = false;
+        assert_eq!(
+            apply_action(
+                state,
+                action,
+                origin,
+                &mut pending_create,
+                &mut pending_mount,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn native_restart_actions_restore_upstream_shade_transitions() {
+        for action in ["restart", "service_mode", "audio"] {
+            let mut state = AppState::new();
+            apply(&mut state, action, ActionOrigin::NativeMenu);
+            assert!(state.shade_forced, "{action} must engage the native shade");
+        }
+
+        let mut state = AppState::new();
+        state.selected_interface = NET_SEL_VMNET_HOST;
+        apply(&mut state, "net_none", ActionOrigin::NativeMenu);
+        assert!(state.shade_forced);
+        state.shade_forced = false;
+        apply(&mut state, "net_none", ActionOrigin::NativeMenu);
+        assert!(!state.shade_forced, "unchanged selection stays a no-op");
+
+        state.selected_interface = NET_SEL_NONE;
+        apply(&mut state, "net_vmnet_host", ActionOrigin::NativeMenu);
+        assert!(state.shade_forced);
+
+        let mut state = AppState::new();
+        state.audio_device_uid = Some("device".into());
+        apply(&mut state, "audio_dev_default", ActionOrigin::NativeMenu);
+        assert!(state.shade_forced);
+    }
+
+    #[test]
+    fn linux_actions_do_not_force_the_legacy_shade() {
+        for action in [
+            "restart",
+            "service_mode",
+            "audio",
+            "net_vmnet_host",
+            "audio_dev_uid_646576696365",
+        ] {
+            let mut state = AppState::new();
+            apply(&mut state, action, ActionOrigin::LinuxOperator);
+            assert!(
+                !state.shade_forced,
+                "{action} must retain Linux live-status semantics"
+            );
+        }
+    }
+
+    #[test]
+    fn every_linux_view_action_survives_shared_state_synchronization() {
+        for (action, selected) in [
+            ("jog_screen", [true, false, false]),
+            ("main_screen", [false, true, false]),
+            ("debug_screen", [false, false, true]),
+        ] {
+            let mut state = AppState::new();
+            apply(&mut state, action, ActionOrigin::LinuxOperator);
+            let local = [
+                state.jog_screen_popped,
+                state.main_screen_popped,
+                state.debug_screen_popped,
+            ];
+            assert_eq!(
+                local, selected,
+                "{action} must be visible to same-frame poll"
+            );
+        }
     }
 }

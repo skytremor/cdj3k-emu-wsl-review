@@ -10,6 +10,12 @@ use egui::{
 
 use cdj3k_emu_platform::{desktop::open_file_picker, menu_state};
 
+use super::BootShadeMode;
+
+fn restart_uses_legacy_shade(mode: BootShadeMode) -> bool {
+    mode == BootShadeMode::LegacyFrameThreshold
+}
+
 // ── Provision step ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -61,6 +67,7 @@ pub struct FirmwareWizard {
     focused_after_open: bool,
     resources_dir: Option<PathBuf>,
     qemu_img: Option<PathBuf>,
+    boot_shade_mode: BootShadeMode,
 }
 
 impl FirmwareWizard {
@@ -69,6 +76,14 @@ impl FirmwareWizard {
     }
 
     pub fn new_with_options(resources_dir: Option<PathBuf>, qemu_img: Option<PathBuf>) -> Self {
+        Self::new_with_boot_shade_mode(resources_dir, qemu_img, BootShadeMode::default())
+    }
+
+    pub(super) fn new_with_boot_shade_mode(
+        resources_dir: Option<PathBuf>,
+        qemu_img: Option<PathBuf>,
+        boot_shade_mode: BootShadeMode,
+    ) -> Self {
         Self {
             open: false,
             upd_path: String::new(),
@@ -80,6 +95,7 @@ impl FirmwareWizard {
             focused_after_open: false,
             resources_dir,
             qemu_img,
+            boot_shade_mode,
         }
     }
 
@@ -291,6 +307,9 @@ impl FirmwareWizard {
                     .fill(accent);
                     if ui.add_sized([110.0, 32.0], restart).clicked() {
                         let mut s = menu_state::lock();
+                        if restart_uses_legacy_shade(self.boot_shade_mode) {
+                            s.shade_forced = true;
+                        }
                         s.restart_requested = true;
                         drop(s);
                         close.store(true, Relaxed);
@@ -636,5 +655,27 @@ fn provision(
     let mut s = menu_state::lock();
     if target_instance == s.current_instance_id {
         s.qemu_boot_requested = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{restart_uses_legacy_shade, FirmwareWizard};
+    use crate::app::BootShadeMode;
+
+    #[test]
+    fn new_keeps_the_upstream_restart_policy_and_bundled_defaults() {
+        let wizard = FirmwareWizard::new();
+        assert_eq!(wizard.boot_shade_mode, BootShadeMode::LegacyFrameThreshold);
+        assert!(wizard.resources_dir.is_none());
+        assert!(wizard.qemu_img.is_none());
+        assert!(restart_uses_legacy_shade(wizard.boot_shade_mode));
+    }
+
+    #[test]
+    fn linux_wizard_restart_does_not_force_the_legacy_shade() {
+        let wizard =
+            FirmwareWizard::new_with_boot_shade_mode(None, None, BootShadeMode::LinuxLiveStatus);
+        assert!(!restart_uses_legacy_shade(wizard.boot_shade_mode));
     }
 }
