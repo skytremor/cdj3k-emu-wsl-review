@@ -34,6 +34,7 @@ check_exec() {
 
 check_exec "QEMU" "${QEMU}"
 check_exec "qemu-img" "${QEMU_IMG}"
+check_exec "cpio" "cpio"
 if ! validate_resource_layout "${RESOURCES}"; then
   failures=$((failures + 1))
 fi

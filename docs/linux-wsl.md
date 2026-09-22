@@ -15,10 +15,11 @@ workspace `rust-version`. Check the selected tools with `cargo --version` and
 `rustc --version` before building. If a system Cargo shadows an installed
 rustup toolchain, select the latter first, for example with
 `export PATH="$HOME/.cargo/bin:$PATH"`. The WSL preflight fails early if either
-selected tool is older than 1.85. Virtual-media image creation additionally requires
-either `mkfs.exfat` or `mkfs.vfat` on `PATH`; `scripts/wsl/run.sh --virtual-media`
-warns if neither is available. Mounting an existing image does not require a
-formatter; Create Image does.
+selected tool is older than 1.85. Firmware provisioning requires `cpio` on
+`PATH`. Virtual-media image creation additionally requires either `mkfs.exfat`
+or `mkfs.vfat` on `PATH`; `scripts/wsl/run.sh --virtual-media` warns if neither
+is available. Mounting an existing image does not require a formatter; Create
+Image does.
 
 ## First run
 
